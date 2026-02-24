@@ -15,6 +15,7 @@ import (
 	"mwb-linux/input"
 	"mwb-linux/network"
 	"mwb-linux/protocol"
+	"mwb-linux/tui"
 )
 
 func main() {
@@ -41,16 +42,17 @@ func main() {
 	var client *network.Client
 	var err error
 
-	if cfg.Mode == "client" {
-		log.Printf("Connecting to Windows MWB at %s:%d...", cfg.RemoteAddress, cfg.ListenPort)
-		client, err = network.Connect(cfg.RemoteAddress, cfg.SecurityKey)
+	switch cfg.Mode {
+	case "client", "tui":
+		log.Printf("Connecting to Windows MWB at %s:%d...", cfg.RemoteAddress, cfg.ListenPort+1)
+		client, err = network.Connect(cfg.RemoteAddress, cfg.ListenPort, cfg.SecurityKey, cfg.MachineName, cfg.Debug)
 		if err != nil {
 			log.Fatalf("Connection failed: %v", err)
 		}
 		log.Println("Connected and handshake complete!")
-	} else {
-		log.Printf("Starting server on port %d, waiting for Windows MWB...", cfg.ListenPort)
-		server, err := network.NewServer(cfg.ListenPort, cfg.SecurityKey, cfg.MachineID)
+	case "server":
+		log.Printf("Starting server on port %d, waiting for Windows MWB...", cfg.ListenPort+1)
+		server, err := network.NewServer(cfg.ListenPort, cfg.SecurityKey, cfg.MachineID, cfg.MachineName, cfg.Debug)
 		if err != nil {
 			log.Fatalf("Server start failed: %v", err)
 		}
@@ -61,6 +63,16 @@ func main() {
 			log.Fatalf("Accept failed: %v", err)
 		}
 		log.Println("Windows MWB connected and handshake complete!")
+	default:
+		log.Fatalf("Unknown mode: %s (use client, server, or tui)", cfg.Mode)
+	}
+
+	// ---- TUI mode: launch debug screen and return ----
+	if cfg.Mode == "tui" {
+		screen := tui.New(60, 20, cfg.Edge, client, cfg.MachineID, cfg.RemoteMachineID, cfg.Debug)
+		screen.Run()
+		client.Conn.Close()
+		return
 	}
 
 	// ---- Setup virtual input devices (for injecting remote input) ----
@@ -129,11 +141,10 @@ func main() {
 
 		pkt := &protocol.GenericData{
 			Header: protocol.Header{
-				Type:     protocol.Mouse,
-				Id:       nextID(),
-				Src:      cfg.MachineID,
-				Des:      0,
-				DateTime: uint64(time.Now().UnixNano() / 10000),
+				Type: protocol.Mouse,
+				Id:   nextID(),
+				Src:  cfg.MachineID,
+				Des:  cfg.RemoteMachineID,
 			},
 			Mouse: &protocol.MouseData{
 				X:          int32(dx),
@@ -177,11 +188,10 @@ func main() {
 
 		pkt := &protocol.GenericData{
 			Header: protocol.Header{
-				Type:     protocol.Mouse,
-				Id:       nextID(),
-				Src:      cfg.MachineID,
-				Des:      0,
-				DateTime: uint64(time.Now().UnixNano() / 10000),
+				Type: protocol.Mouse,
+				Id:   nextID(),
+				Src:  cfg.MachineID,
+				Des:  cfg.RemoteMachineID,
 			},
 			Mouse: &protocol.MouseData{
 				Flags: flags,
@@ -213,7 +223,7 @@ func main() {
 				Type:     protocol.Keyboard,
 				Id:       nextID(),
 				Src:      cfg.MachineID,
-				Des:      0,
+				Des:      cfg.RemoteMachineID,
 				DateTime: uint64(time.Now().UnixNano() / 10000),
 			},
 			Keyboard: &protocol.KeyboardData{
@@ -242,7 +252,7 @@ func main() {
 				Type:     protocol.ClipboardText,
 				Id:       nextID(),
 				Src:      cfg.MachineID,
-				Des:      0,
+				Des:      cfg.RemoteMachineID,
 				DateTime: uint64(time.Now().UnixNano() / 10000),
 			},
 			Raw: textBytes,
@@ -271,7 +281,7 @@ func main() {
 					Type:     protocol.Heartbeat,
 					Id:       nextID(),
 					Src:      cfg.MachineID,
-					Des:      0,
+					Des:      cfg.RemoteMachineID,
 					DateTime: uint64(time.Now().UnixNano() / 10000),
 				},
 			}

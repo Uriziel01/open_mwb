@@ -1,8 +1,11 @@
 package network
 
 import (
+	"crypto/rand"
+	"encoding/binary"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"time"
 
@@ -11,19 +14,43 @@ import (
 )
 
 type Client struct {
-	Conn   net.Conn
-	Crypto *crypto.MWBCrypto
+	Conn        net.Conn
+	Cipher      *crypto.StreamCipher
+	MagicNumber uint32
+	Debug       bool
+	MachineName string
 }
 
-func Connect(address string, securityKey string) (*Client, error) {
-	conn, err := net.DialTimeout("tcp", fmt.Sprintf("%s:15100", address), 5*time.Second)
+func Connect(address string, port int, securityKey string, machineName string, debug bool) (*Client, error) {
+	connectPort := port + 1
+
+	log.Printf("[connect] Dialing %s:%d...", address, connectPort)
+	conn, err := net.DialTimeout("tcp", fmt.Sprintf("%s:%d", address, connectPort), 5*time.Second)
 	if err != nil {
-		return nil, fmt.Errorf("failed to connect to MWB server at %s: %w", address, err)
+		return nil, fmt.Errorf("failed to connect to MWB at %s:%d: %w", address, connectPort, err)
 	}
 
+	mc := crypto.NewMWBCrypto(securityKey)
 	c := &Client{
-		Conn:   conn,
-		Crypto: crypto.NewMWBCrypto(securityKey),
+		Conn:        conn,
+		Cipher:      mc.NewStreamCipher(debug),
+		MagicNumber: mc.MagicNumber,
+		Debug:       debug,
+		MachineName: machineName,
+	}
+
+	if debug {
+		log.Printf("[connect] Connected. Magic=0x%08X, Name=%q", mc.MagicNumber, machineName)
+	}
+
+	// Prime CBC streams (C#: SendOrReceiveARandomDataBlockPerInitialIV)
+	if err := c.Cipher.SendRandomBlock(conn); err != nil {
+		conn.Close()
+		return nil, fmt.Errorf("CBC primer send failed: %w", err)
+	}
+	if err := c.Cipher.ReceiveRandomBlock(conn); err != nil {
+		conn.Close()
+		return nil, fmt.Errorf("CBC primer receive failed: %w", err)
 	}
 
 	if err := c.handshake(); err != nil {
@@ -35,129 +62,162 @@ func Connect(address string, securityKey string) (*Client, error) {
 }
 
 func (c *Client) handshake() error {
-	// 1. Create Handshake packet
-	handshakeData := &protocol.GenericData{
-		Header: protocol.Header{
-			Type:     protocol.Handshake,
-			Id:       1,
-			Src:      1,                                     // Linux ID
-			Des:      0,                                     // Windows ID, 0=None
-			DateTime: uint64(time.Now().UnixNano() / 10000), // Windows ticks approx
-		},
-		Handshake: &protocol.HandshakeData{
-			Machine1: 100,
-			Machine2: 200,
-			Machine3: 300,
-			Machine4: 400,
-		},
+	// Generate random Machine1-4 (matching C#: buf = RandomNumberGenerator.GetBytes(PACKAGE_SIZE_EX))
+	randBuf := make([]byte, 16)
+	if _, err := rand.Read(randBuf); err != nil {
+		return fmt.Errorf("failed to generate random handshake data: %w", err)
 	}
 
-	plainBytes, err := protocol.Marshal(handshakeData)
+	ourM1 := binary.LittleEndian.Uint32(randBuf[0:4])
+	ourM2 := binary.LittleEndian.Uint32(randBuf[4:8])
+	ourM3 := binary.LittleEndian.Uint32(randBuf[8:12])
+	ourM4 := binary.LittleEndian.Uint32(randBuf[12:16])
+
+	handshakeData := &protocol.GenericData{
+		Header: protocol.Header{
+			Type: protocol.Handshake,
+			Id:   1,
+			Src:  0, // ID.NONE during handshake
+		},
+		Handshake: &protocol.HandshakeData{
+			Machine1: ourM1,
+			Machine2: ourM2,
+			Machine3: ourM3,
+			Machine4: ourM4,
+		},
+		MachineName: c.MachineName,
+	}
+
+	plainBytes, err := protocol.Marshal(handshakeData, c.MagicNumber, c.Debug)
 	if err != nil {
 		return err
 	}
 
-	encryptedBytes := c.Crypto.Encrypt(plainBytes)
-
-	// 2. Send 10 times consecutively
+	// Send 10 times (each advances CBC state)
 	for i := 0; i < 10; i++ {
-		_, err = c.Conn.Write(encryptedBytes)
+		encrypted := c.Cipher.Encrypt(plainBytes)
+		_, err = c.Conn.Write(encrypted)
 		if err != nil {
 			return err
 		}
 	}
 
-	// 3. Receive HandshakeAck (we might get multiple acks because we sent 10)
-	c.Conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	// Compute expected ack values: bitwise NOT of our Machine1-4
+	expectedM1 := ^ourM1
+	expectedM2 := ^ourM2
+	expectedM3 := ^ourM3
+	expectedM4 := ^ourM4
 
-	// Usually packets are padded to AES block size (16).
-	// Our payload + padding might be 48 or 64 or 80 bytes.
-	// Since we know the plaintext was 64 bytes (PackageSizeEx),
-	// the PKCS7 padded ciphertext is 80 bytes.
-	respBuf := make([]byte, 80)
+	log.Printf("[handshake] Sent 10 handshake packets (name=%q), waiting for handshake exchange...", c.MachineName)
 
-	// Keep reading until we get a valid HandshakeAck
-	for {
-		_, err := io.ReadFull(c.Conn, respBuf)
+	// Now enter receive loop:
+	// - When we get their Handshake: respond with HandshakeAck (bitwise NOT, include our MachineName)
+	// - When we get our HandshakeAck (matching our expected values): handshake complete!
+	c.Conn.SetReadDeadline(time.Now().Add(10 * time.Second))
+	gotOurAck := false
+
+	for !gotOurAck {
+		pkt, err := c.readPacket()
 		if err != nil {
-			return fmt.Errorf("failed to read handshake ack: %v", err)
+			return fmt.Errorf("failed during handshake: %v", err)
 		}
 
-		plainResp := c.Crypto.Decrypt(respBuf)
-		if plainResp == nil {
-			continue // decryption failed, maybe read more bytes or wrong packet?
-		}
+		switch pkt.Header.Type {
+		case protocol.Handshake:
+			// Windows sent us its handshake — respond with HandshakeAck
+			if pkt.Handshake != nil {
+				if c.Debug {
+					log.Printf("[handshake] Received their Handshake from %q, sending HandshakeAck", pkt.MachineName)
+				}
+				ack := &protocol.GenericData{
+					Header: protocol.Header{
+						Type: protocol.HandshakeAck,
+						Id:   pkt.Header.Id,
+						Src:  0, // ID.NONE
+					},
+					Handshake: &protocol.HandshakeData{
+						Machine1: ^pkt.Handshake.Machine1,
+						Machine2: ^pkt.Handshake.Machine2,
+						Machine3: ^pkt.Handshake.Machine3,
+						Machine4: ^pkt.Handshake.Machine4,
+					},
+					MachineName: c.MachineName,
+				}
 
-		respData, err := protocol.Unmarshal(plainResp)
-		if err != nil {
-			continue
-		}
+				if err := c.Send(ack); err != nil {
+					return fmt.Errorf("failed to send HandshakeAck: %v", err)
+				}
+			}
 
-		if respData.Header.Type == protocol.HandshakeAck {
-			// 4. Verify bitwise NOT
-			if respData.Handshake.Machine1 == ^uint32(100) &&
-				respData.Handshake.Machine2 == ^uint32(200) &&
-				respData.Handshake.Machine3 == ^uint32(300) &&
-				respData.Handshake.Machine4 == ^uint32(400) {
+		case protocol.HandshakeAck:
+			// Check if this is the ack for OUR handshake
+			if pkt.Handshake != nil &&
+				pkt.Handshake.Machine1 == expectedM1 &&
+				pkt.Handshake.Machine2 == expectedM2 &&
+				pkt.Handshake.Machine3 == expectedM3 &&
+				pkt.Handshake.Machine4 == expectedM4 {
 
-				// Reset deadline
-				c.Conn.SetReadDeadline(time.Time{})
-				return nil // Handshake success
+				log.Printf("[handshake] ✓ Received valid HandshakeAck from %q — connection trusted!", pkt.MachineName)
+				gotOurAck = true
 			} else {
-				return fmt.Errorf("handshake ack crypto signature invalid")
+				if c.Debug {
+					log.Printf("[handshake] Received HandshakeAck but machine values don't match, skipping")
+				}
+			}
+
+		default:
+			if c.Debug {
+				log.Printf("[handshake] Ignoring packet type=%d during handshake", pkt.Header.Type)
 			}
 		}
 	}
+
+	c.Conn.SetReadDeadline(time.Time{})
+	return nil
 }
 
-// Send sends a generic data packet encrypted over the TCP socket
-func (c *Client) Send(data *protocol.GenericData) error {
-	plainBytes, err := protocol.Marshal(data)
-	if err != nil {
-		return err
-	}
-
-	encrypted := c.Crypto.Encrypt(plainBytes)
-	_, err = c.Conn.Write(encrypted)
-	return err
-}
-
-// Receive blocks until a complete packet is read, decrypted and unmarshaled
-func (c *Client) Receive() (*protocol.GenericData, error) {
-	// A packet ciphertext length for PackageSizeEx (64) + pkcs7 pad is 80 bytes.
-	// For PackageSize (32) + pkcs7 it is 48 bytes.
-	// Read a chunk. Easiest way is reading 48 bytes and if it fails, read some more.
-	// Since MWB mostly sends fixed size, we could read exactly those.
-	buf := make([]byte, 48) // At minimum it's 32 padded to 48
+// readPacket reads a single packet (base 32 bytes, extended to 64 if big type).
+func (c *Client) readPacket() (*protocol.GenericData, error) {
+	buf := make([]byte, protocol.PackageSize)
 	_, err := io.ReadFull(c.Conn, buf)
 	if err != nil {
 		return nil, err
 	}
 
-	// Wait, MWB packets might be prepended by a 4 byte length header in C# TCP streams,
-	// but the analysis document says "fixed-size binary packets", NOT length prefixed.
-	// But AES is block based, so if they pad, they send blocks.
+	plain := c.Cipher.Decrypt(buf)
+	if plain == nil {
+		return nil, fmt.Errorf("failed to decrypt base packet")
+	}
 
-	plain := c.Crypto.Decrypt(buf)
-	if plain != nil {
-		data, err := protocol.Unmarshal(plain)
-		if err == nil {
-			return data, nil
+	pktType := protocol.PackageType(plain[0])
+	if protocol.IsBigPackage(pktType) {
+		buf2 := make([]byte, protocol.PackageSizeEx-protocol.PackageSize)
+		_, err = io.ReadFull(c.Conn, buf2)
+		if err != nil {
+			return nil, fmt.Errorf("failed to read extended packet: %v", err)
+		}
+		plain2 := c.Cipher.Decrypt(buf2)
+		if plain2 != nil {
+			plain = append(plain, plain2...)
 		}
 	}
 
-	// If failed, read up to 80 bytes (32 more)
-	buf2 := make([]byte, 32)
-	_, err = io.ReadFull(c.Conn, buf2)
+	return protocol.Unmarshal(plain, c.MagicNumber, c.Debug)
+}
+
+// Send sends a generic data packet encrypted over the TCP socket.
+func (c *Client) Send(data *protocol.GenericData) error {
+	plainBytes, err := protocol.Marshal(data, c.MagicNumber, c.Debug)
 	if err != nil {
-		return nil, err
+		return err
 	}
 
-	fullBuf := append(buf, buf2...)
-	plain = c.Crypto.Decrypt(fullBuf)
-	if plain != nil {
-		return protocol.Unmarshal(plain)
-	}
+	encrypted := c.Cipher.Encrypt(plainBytes)
+	_, err = c.Conn.Write(encrypted)
+	return err
+}
 
-	return nil, fmt.Errorf("failed to decrypt packet")
+// Receive blocks until a complete packet is read, decrypted and unmarshaled.
+func (c *Client) Receive() (*protocol.GenericData, error) {
+	return c.readPacket()
 }
