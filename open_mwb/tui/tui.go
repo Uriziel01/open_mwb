@@ -168,8 +168,8 @@ func (s *Screen) handleArrowKey(dx, dy int) {
 
 	if s.IsRemote {
 		// Forward movement to Windows as absolute mouse events
-		s.RemoteCursorX += int32(dx * 2000)
-		s.RemoteCursorY += int32(dy * 2000)
+		s.RemoteCursorX += int32(dx * 1000)
+		s.RemoteCursorY += int32(dy * 1000)
 		
 		if s.RemoteCursorX < 0 { s.RemoteCursorX = 0 }
 		if s.RemoteCursorX > 65535 { s.RemoteCursorX = 65535 }

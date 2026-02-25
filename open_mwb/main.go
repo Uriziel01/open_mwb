@@ -103,7 +103,7 @@ func main() {
 
 	// ---- TUI mode: launch debug screen and return ----
 	if cfg.Mode == "tui" {
-		screen := tui.New(60, 20, cfg.Edge, client, cfg.MachineID, cfg.RemoteMachineID, cfg.Debug)
+		screen := tui.New(60, 20, cfg.Edge, client, cfg.MachineID, client.RemoteMachineID, cfg.Debug)
 		screen.Run()
 		client.Conn.Close()
 		return
@@ -196,7 +196,7 @@ func main() {
 				Type: protocol.Mouse,
 				Id:   nextID(),
 				Src:  cfg.MachineID,
-				Des:  cfg.RemoteMachineID,
+				Des:  client.RemoteMachineID,
 			},
 			Mouse: &protocol.MouseData{
 				X:          remoteCursorX,
@@ -243,7 +243,7 @@ func main() {
 				Type: protocol.Mouse,
 				Id:   nextID(),
 				Src:  cfg.MachineID,
-				Des:  cfg.RemoteMachineID,
+				Des:  client.RemoteMachineID,
 			},
 			Mouse: &protocol.MouseData{
 				X:     remoteCursorX,
@@ -277,7 +277,7 @@ func main() {
 				Type:     protocol.Keyboard,
 				Id:       nextID(),
 				Src:      cfg.MachineID,
-				Des:      cfg.RemoteMachineID,
+				Des:      client.RemoteMachineID,
 				DateTime: uint64(time.Now().UnixNano() / 10000),
 			},
 			Keyboard: &protocol.KeyboardData{
@@ -306,7 +306,7 @@ func main() {
 				Type:     protocol.ClipboardText,
 				Id:       nextID(),
 				Src:      cfg.MachineID,
-				Des:      cfg.RemoteMachineID,
+				Des:      client.RemoteMachineID,
 				DateTime: uint64(time.Now().UnixNano() / 10000),
 			},
 			Raw: textBytes,
@@ -336,7 +336,7 @@ func main() {
 					Type:     protocol.Heartbeat,
 					Id:       nextID(),
 					Src:      cfg.MachineID,
-					Des:      cfg.RemoteMachineID,
+					Des:      client.RemoteMachineID,
 					DateTime: uint64(time.Now().UnixNano() / 10000),
 				},
 				MachineName: cfg.MachineName,
@@ -356,7 +356,7 @@ func main() {
 					Type:     protocol.Heartbeat,
 					Id:       nextID(),
 					Src:      cfg.MachineID,
-					Des:      cfg.RemoteMachineID,
+					Des:      client.RemoteMachineID,
 					DateTime: uint64(time.Now().UnixNano() / 10000),
 				},
 				MachineName: cfg.MachineName,

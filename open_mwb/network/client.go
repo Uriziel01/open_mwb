@@ -17,9 +17,10 @@ type Client struct {
 	Conn        net.Conn
 	Cipher      *crypto.StreamCipher
 	MagicNumber uint32
-	MachineID   uint32
-	Debug       bool
-	MachineName string
+	MachineID       uint32
+	RemoteMachineID uint32
+	Debug           bool
+	MachineName     string
 }
 
 func Connect(address string, port int, securityKey string, machineID uint32, machineName string, debug bool) (*Client, error) {
@@ -136,6 +137,9 @@ func (c *Client) handshake() error {
 
 		switch pkt.Header.Type {
 		case protocol.Handshake:
+			// Capture the Remote Machine ID dynamically from the Handshake packet!
+			c.RemoteMachineID = pkt.Header.Src
+
 			// Windows sent us its handshake — respond with HandshakeAck
 			if pkt.Handshake != nil {
 				if c.Debug {
@@ -168,6 +172,9 @@ func (c *Client) handshake() error {
 				pkt.Handshake.Machine2 == expectedM2 &&
 				pkt.Handshake.Machine3 == expectedM3 &&
 				pkt.Handshake.Machine4 == expectedM4 {
+
+				// Just in case we didn't capture it yet
+				c.RemoteMachineID = pkt.Header.Src
 
 				log.Printf("[handshake] ✓ Received valid HandshakeAck from %q — connection trusted!", pkt.MachineName)
 				gotOurAck = true
