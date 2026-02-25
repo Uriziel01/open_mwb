@@ -10,9 +10,9 @@ import (
 
 	"golang.org/x/term"
 
-	"mwb-linux/input"
-	"mwb-linux/network"
-	"mwb-linux/protocol"
+	"open-mwb/input"
+	"open-mwb/network"
+	"open-mwb/protocol"
 )
 
 // Screen represents the virtual terminal screen for debugging.

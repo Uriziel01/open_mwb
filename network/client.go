@@ -9,8 +9,8 @@ import (
 	"net"
 	"time"
 
-	"mwb-linux/crypto"
-	"mwb-linux/protocol"
+	"open-mwb/crypto"
+	"open-mwb/protocol"
 )
 
 type Client struct {

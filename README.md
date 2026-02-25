@@ -13,7 +13,7 @@ Mouse Without Borders is a fantastic tool that lets you share a single keyboard 
 - **Clipboard sync** — copy on Windows, paste on Linux (and vice versa)
 - **Absolute coordinate protocol** — uses the same resolution-independent 0–65535 coordinate system as the official client
 - **TUI debug mode** — a built-in terminal UI that lets you test the connection without needing real input devices (great for VMs, containers, or SSH sessions)
-- **Cross-compilable** — builds natively for Linux, and cross-compiles to `mwb.exe` for Windows TUI testing
+- **Cross-compilable** — builds natively for Linux (`open-mwb`), and cross-compiles to `open-mwb.exe` for Windows TUI testing
 
 ---
 
@@ -39,14 +39,14 @@ The MWB protocol is a lightweight, encrypted TCP protocol:
 ### Build
 
 ```bash
-git clone https://github.com/youruser/open-mwb.git
-cd open-mwb
+git clone https://github.com/Uriziel01/open_mwb.git
+cd open_mwb
 
 # Linux binary
-go build -o mwb-linux .
+go build -o open-mwb .
 
 # Windows binary (for TUI testing)
-GOOS=windows go build -o mwb.exe .
+GOOS=windows go build -o open-mwb.exe .
 ```
 
 ### Configure
@@ -79,7 +79,7 @@ Create a `config.json` next to the binary (or in the working directory):
 
 ```bash
 # Run as root (required for /dev/uinput and raw input device access)
-sudo ./mwb-linux
+sudo ./open-mwb
 ```
 
 ---

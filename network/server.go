@@ -5,7 +5,7 @@ import (
 	"log"
 	"net"
 
-	"mwb-linux/crypto"
+	"open-mwb/crypto"
 )
 
 // Server listens for incoming connections from Windows MWB.

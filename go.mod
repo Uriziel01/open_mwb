@@ -1,4 +1,4 @@
-module mwb-linux
+module open-mwb
 
 go 1.25.7
 

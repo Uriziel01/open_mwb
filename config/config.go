@@ -196,7 +196,7 @@ func (c *Config) Validate() error {
 func PrintUsage() {
 	fmt.Fprintf(os.Stderr, `Mouse Without Borders - Linux POC
 Usage:
-  mwb-linux [options]
+  open-mwb [options]
 
 Config is loaded from config.json (auto-detected next to binary, in cwd,
 or in parent dir). CLI flags override config.json values.

@@ -10,12 +10,12 @@ import (
 	"syscall"
 	"time"
 
-	"mwb-linux/clipboard"
-	"mwb-linux/config"
-	"mwb-linux/input"
-	"mwb-linux/network"
-	"mwb-linux/protocol"
-	"mwb-linux/tui"
+	"open-mwb/clipboard"
+	"open-mwb/config"
+	"open-mwb/input"
+	"open-mwb/network"
+	"open-mwb/protocol"
+	"open-mwb/tui"
 )
 
 func main() {
