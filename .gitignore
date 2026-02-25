@@ -1,2 +1,10 @@
+# Local config (contains security key)
 config.json
-old_mwb
+
+# Reference source (Windows MWB, not our code)
+old_mwb/
+
+# Compiled binaries
+mwb-linux
+mwb.exe
+*.exe
