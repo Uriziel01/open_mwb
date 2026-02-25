@@ -27,6 +27,9 @@ type Screen struct {
 	CursorX int
 	CursorY int
 
+	RemoteCursorX int32
+	RemoteCursorY int32
+
 	// Edge config
 	Edge string
 
@@ -57,6 +60,8 @@ func New(width, height int, edge string, client *network.Client, machineID, remo
 		MachineID:       machineID,
 		RemoteMachineID: remoteMachineID,
 		PacketID:        100,
+		RemoteCursorX:   32768,
+		RemoteCursorY:   32768,
 		Status:          "LOCAL - use arrows to move, hit edge to switch",
 	}
 }
@@ -128,8 +133,16 @@ func (s *Screen) handleArrowKey(dx, dy int) {
 	defer s.mu.Unlock()
 
 	if s.IsRemote {
-		// Forward movement to Windows as relative mouse events
-		s.sendMousePacket(dx*5, dy*5, 0, input.WM_MOUSEMOVE)
+		// Forward movement to Windows as absolute mouse events
+		s.RemoteCursorX += int32(dx * 2000)
+		s.RemoteCursorY += int32(dy * 2000)
+		
+		if s.RemoteCursorX < 0 { s.RemoteCursorX = 0 }
+		if s.RemoteCursorX > 65535 { s.RemoteCursorX = 65535 }
+		if s.RemoteCursorY < 0 { s.RemoteCursorY = 0 }
+		if s.RemoteCursorY > 65535 { s.RemoteCursorY = 65535 }
+
+		s.sendMousePacket(int(s.RemoteCursorX), int(s.RemoteCursorY), 0, input.WM_MOUSEMOVE)
 		// Also move local cursor to show direction
 		s.CursorX += dx
 		s.CursorY += dy
@@ -160,6 +173,8 @@ func (s *Screen) handleArrowKey(dx, dy int) {
 	if edgeHit {
 		s.IsRemote = true
 		s.Status = fmt.Sprintf("REMOTE - controlling Windows! (space=return)")
+		s.RemoteCursorX = 32768
+		s.RemoteCursorY = 32768
 		s.renderLocked()
 		return
 	}
@@ -254,8 +269,9 @@ func (s *Screen) renderLocked() {
 	fmt.Print(b.String())
 }
 
-func (s *Screen) sendMousePacket(dx, dy, wheelDelta, flags int) {
+func (s *Screen) sendMousePacket(x, y, wheelDelta, flags int) {
 	s.PacketID++
+	
 	pkt := &protocol.GenericData{
 		Header: protocol.Header{
 			Type: protocol.Mouse,
@@ -264,8 +280,8 @@ func (s *Screen) sendMousePacket(dx, dy, wheelDelta, flags int) {
 			Des:  s.RemoteMachineID,
 		},
 		Mouse: &protocol.MouseData{
-			X:          int32(dx),
-			Y:          int32(dy),
+			X:          int32(x),
+			Y:          int32(y),
 			WheelDelta: int32(wheelDelta),
 			Flags:      int32(flags),
 		},
@@ -292,15 +308,9 @@ func (s *Screen) receiveLoop() {
 		switch pkt.Header.Type {
 		case protocol.Mouse:
 			if pkt.Mouse != nil {
-				if pkt.Mouse.Flags&int32(input.WinMouseEventFAbsolute) != 0 {
-					// Absolute: scale from 0-65535 to our screen
-					s.CursorX = int(pkt.Mouse.X) * s.Width / 65536
-					s.CursorY = int(pkt.Mouse.Y) * s.Height / 65536
-				} else {
-					// Relative movement (scale down heavily since text cells are huge)
-					s.CursorX += int(pkt.Mouse.X) / 30
-					s.CursorY += int(pkt.Mouse.Y) / 30
-				}
+				// We always receive Absolute coordinates from Windows. Scale them directly to TUI grid.
+				s.CursorX = int(pkt.Mouse.X) * s.Width / 65536
+				s.CursorY = int(pkt.Mouse.Y) * s.Height / 65536
 				s.clampCursor()
 				s.Status = fmt.Sprintf("Recv mouse: (%d,%d) flags=0x%X", pkt.Mouse.X, pkt.Mouse.Y, pkt.Mouse.Flags)
 
@@ -353,6 +363,7 @@ func (s *Screen) heartbeatLoop() {
 				Src:      s.MachineID,
 				DateTime: uint64(time.Now().UnixNano() / 10000),
 			},
+			MachineName: s.Client.MachineName,
 		}
 		s.Client.Send(pkt)
 		s.mu.Unlock()

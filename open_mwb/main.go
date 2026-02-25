@@ -166,11 +166,29 @@ func main() {
 		log.Println("[main] Returning to local control")
 	}
 
+	var remoteCursorX int32 = 32768
+	var remoteCursorY int32 = 32768
+
 	// Forward mouse movements to Windows
 	evdev.OnMouseEvent = func(dx, dy, wheelDelta int) {
 		flags := int32(input.WM_MOUSEMOVE)
 		if wheelDelta != 0 {
 			flags = input.WM_MOUSEWHEEL
+		}
+
+		if flags == input.WM_MOUSEMOVE {
+			remoteCursorX += int32(dx * 40) // Sensitivity multiplier since 65535 is large
+			remoteCursorY += int32(dy * 40)
+			if remoteCursorX < 0 {
+				remoteCursorX = 0
+			} else if remoteCursorX > 65535 {
+				remoteCursorX = 65535
+			}
+			if remoteCursorY < 0 {
+				remoteCursorY = 0
+			} else if remoteCursorY > 65535 {
+				remoteCursorY = 65535
+			}
 		}
 
 		pkt := &protocol.GenericData{
@@ -181,8 +199,8 @@ func main() {
 				Des:  cfg.RemoteMachineID,
 			},
 			Mouse: &protocol.MouseData{
-				X:          int32(dx),
-				Y:          int32(dy),
+				X:          remoteCursorX,
+				Y:          remoteCursorY,
 				WheelDelta: int32(wheelDelta),
 				Flags:      flags,
 			},
@@ -228,6 +246,8 @@ func main() {
 				Des:  cfg.RemoteMachineID,
 			},
 			Mouse: &protocol.MouseData{
+				X:     remoteCursorX,
+				Y:     remoteCursorY,
 				Flags: flags,
 			},
 		}
@@ -319,6 +339,7 @@ func main() {
 					Des:      cfg.RemoteMachineID,
 					DateTime: uint64(time.Now().UnixNano() / 10000),
 				},
+				MachineName: cfg.MachineName,
 			}
 			sendMu.Lock()
 			client.Send(pkt)
@@ -338,6 +359,7 @@ func main() {
 					Des:      cfg.RemoteMachineID,
 					DateTime: uint64(time.Now().UnixNano() / 10000),
 				},
+				MachineName: cfg.MachineName,
 			}
 			sendMu.Lock()
 			client.Send(pkt)
