@@ -125,6 +125,40 @@ func (s *Screen) Run() {
 			s.mu.Unlock()
 			s.render()
 		}
+
+		// 'x' to click
+		if (buf[0] == 'x' || buf[0] == 'X') && s.IsRemote {
+			s.mu.Lock()
+			s.sendMousePacket(int(s.RemoteCursorX), int(s.RemoteCursorY), 0, input.WM_LBUTTONDOWN)
+			s.sendMousePacket(int(s.RemoteCursorX), int(s.RemoteCursorY), 0, input.WM_LBUTTONUP)
+			s.Status = "REMOTE - left click sent"
+			s.mu.Unlock()
+			s.render()
+		}
+
+		// 'c' to copy timestamp to target PC clipboard
+		if (buf[0] == 'c' || buf[0] == 'C') && s.IsRemote {
+			s.mu.Lock()
+			s.PacketID++
+			ts := time.Now().Format(time.RFC3339)
+			pkt := &protocol.GenericData{
+				Header: protocol.Header{
+					Type:     protocol.ClipboardText,
+					Id:       s.PacketID,
+					Src:      s.MachineID,
+					Des:      s.RemoteMachineID,
+					DateTime: uint64(time.Now().UnixNano() / 10000),
+				},
+				Raw: []byte(ts),
+			}
+			if err := s.Client.Send(pkt); err != nil {
+				s.Status = "Send error: " + err.Error()
+			} else {
+				s.Status = "REMOTE - sent clipboard timestamp"
+			}
+			s.mu.Unlock()
+			s.render()
+		}
 	}
 }
 
@@ -264,7 +298,7 @@ func (s *Screen) renderLocked() {
 
 	// Status line
 	b.WriteString(fmt.Sprintf(" %s\033[K\n", s.Status))
-	b.WriteString(" [arrows]=move  [space]=return to local  [q]=quit\033[K\n")
+	b.WriteString(" [arrows]=move  [space]=return to local  [x]=click  [c]=clipboard  [q]=quit\033[K\n")
 
 	fmt.Print(b.String())
 }
