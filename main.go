@@ -1,5 +1,6 @@
 package main
 
+
 import (
 	"flag"
 	"fmt"
@@ -18,8 +19,15 @@ import (
 	"open-mwb/tui"
 )
 
+const Version = "0.1.0"
+
 func main() {
 	cfg := config.Parse()
+
+	if cfg.ShowVersion {
+		fmt.Printf("open-mwb version %s\n", Version)
+		os.Exit(0)
+	}
 
 	if cfg.ListDevices {
 		fmt.Println("Available input devices:")
@@ -34,7 +42,7 @@ func main() {
 	}
 
 	log.SetFlags(log.Ltime | log.Lmicroseconds)
-	log.Println("=== Mouse Without Borders - Linux POC ===")
+	log.Printf("=== open-mwb v%s ===", Version)
 	log.Printf("Mode: %s | Edge: %s | Screen: %dx%d | MachineID: %d",
 		cfg.Mode, cfg.Edge, cfg.ScreenWidth, cfg.ScreenHeight, cfg.MachineID)
 

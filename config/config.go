@@ -39,6 +39,7 @@ type Config struct {
 	// CLI-only, not in JSON
 	ListDevices    bool   `json:"-"`
 	ConfigFile     string `json:"-"`
+	ShowVersion    bool   `json:"-"`
 }
 
 // defaultConfigPaths returns paths to search for config.json, in priority order.
@@ -117,6 +118,7 @@ func Parse() *Config {
 		flagDebug    = flag.Bool("debug", false, "Enable debug packet logging")
 	)
 	flag.BoolVar(&c.ListDevices, "list-devices", false, "List all /dev/input devices and exit")
+	flag.BoolVar(&c.ShowVersion, "version", false, "Print version and exit")
 
 	flag.Parse()
 
