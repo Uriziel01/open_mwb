@@ -153,7 +153,7 @@ func (c *Client) handshake() error {
 						Machine3: ^pkt.Handshake.Machine3,
 						Machine4: ^pkt.Handshake.Machine4,
 					},
-					MachineName: c.MachineName,
+					MachineName: c.MachineName, // Explicitly provide this so Windows registers our name
 				}
 
 				if err := c.Send(ack); err != nil {

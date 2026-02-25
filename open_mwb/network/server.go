@@ -72,7 +72,9 @@ func (s *Server) Accept() (*Client, error) {
 			continue
 		}
 
-		// Use the same bidirectional handshake as client
+		// Both Windows and Linux MUST spontaneously emit their 10 handshake packets
+		// whether they accepted the tcp connection or initiated it.
+		// `client.handshake()` already does exactly this bidirectionally.
 		if err := client.handshake(); err != nil {
 			log.Printf("[server] Handshake failed from %s: %v", conn.RemoteAddr(), err)
 			conn.Close()

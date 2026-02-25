@@ -307,6 +307,26 @@ func main() {
 
 	// Heartbeat sender
 	go func() {
+		// Windows needs ~10 valid packets before it considers the connection fully alive
+		// and moves past the HandshakeAck phase (it increments `packageCount`).
+		// Send a burst of heartbeats right after connecting to satisfy this.
+		for i := 0; i < 15; i++ {
+			pkt := &protocol.GenericData{
+				Header: protocol.Header{
+					Type:     protocol.Heartbeat,
+					Id:       nextID(),
+					Src:      cfg.MachineID,
+					Des:      cfg.RemoteMachineID,
+					DateTime: uint64(time.Now().UnixNano() / 10000),
+				},
+			}
+			sendMu.Lock()
+			client.Send(pkt)
+			sendMu.Unlock()
+			time.Sleep(100 * time.Millisecond)
+		}
+
+		// Then fall back to regular 2-second heartbeats
 		ticker := time.NewTicker(2 * time.Second)
 		defer ticker.Stop()
 		for range ticker.C {
