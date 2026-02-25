@@ -168,9 +168,9 @@ func main() {
 
 	// Forward mouse movements to Windows
 	evdev.OnMouseEvent = func(dx, dy, wheelDelta int) {
-		flags := int32(input.WinMouseEventFMove)
+		flags := int32(input.WM_MOUSEMOVE)
 		if wheelDelta != 0 {
-			flags |= input.WinMouseEventFWheel
+			flags = input.WM_MOUSEWHEEL
 		}
 
 		pkt := &protocol.GenericData{
@@ -202,21 +202,21 @@ func main() {
 		switch code {
 		case input.BTN_LEFT:
 			if pressed {
-				flags = input.WinMouseEventFLeftDown
+				flags = input.WM_LBUTTONDOWN
 			} else {
-				flags = input.WinMouseEventFLeftUp
+				flags = input.WM_LBUTTONUP
 			}
 		case input.BTN_RIGHT:
 			if pressed {
-				flags = input.WinMouseEventFRightDown
+				flags = input.WM_RBUTTONDOWN
 			} else {
-				flags = input.WinMouseEventFRightUp
+				flags = input.WM_RBUTTONUP
 			}
 		case input.BTN_MIDDLE:
 			if pressed {
-				flags = input.WinMouseEventFMiddleDown
+				flags = input.WM_MBUTTONDOWN
 			} else {
-				flags = input.WinMouseEventFMiddleUp
+				flags = input.WM_MBUTTONUP
 			}
 		}
 
@@ -247,9 +247,9 @@ func main() {
 			return
 		}
 
-		flags := int32(0)
+		flags := int32(input.WM_KEYDOWN)
 		if !pressed {
-			flags = input.WinKeyEventFKeyUp
+			flags = input.WM_KEYUP
 		}
 
 		pkt := &protocol.GenericData{

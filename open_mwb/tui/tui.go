@@ -8,7 +8,7 @@ import (
 	"sync"
 	"time"
 
-	"golang.org/x/sys/unix"
+	"golang.org/x/term"
 
 	"mwb-linux/input"
 	"mwb-linux/network"
@@ -41,7 +41,7 @@ type Screen struct {
 	PacketID        uint32
 
 	// Original terminal state for restore
-	origTermios unix.Termios
+	origState *term.State
 }
 
 // New creates a new TUI debug screen.
@@ -129,7 +129,7 @@ func (s *Screen) handleArrowKey(dx, dy int) {
 
 	if s.IsRemote {
 		// Forward movement to Windows as relative mouse events
-		s.sendMousePacket(dx*5, dy*5, 0, input.WinMouseEventFMove)
+		s.sendMousePacket(dx*5, dy*5, 0, input.WM_MOUSEMOVE)
 		// Also move local cursor to show direction
 		s.CursorX += dx
 		s.CursorY += dy
@@ -297,9 +297,9 @@ func (s *Screen) receiveLoop() {
 					s.CursorX = int(pkt.Mouse.X) * s.Width / 65536
 					s.CursorY = int(pkt.Mouse.Y) * s.Height / 65536
 				} else {
-					// Relative movement
-					s.CursorX += int(pkt.Mouse.X) / 5
-					s.CursorY += int(pkt.Mouse.Y) / 5
+					// Relative movement (scale down heavily since text cells are huge)
+					s.CursorX += int(pkt.Mouse.X) / 30
+					s.CursorY += int(pkt.Mouse.Y) / 30
 				}
 				s.clampCursor()
 				s.Status = fmt.Sprintf("Recv mouse: (%d,%d) flags=0x%X", pkt.Mouse.X, pkt.Mouse.Y, pkt.Mouse.Flags)
@@ -361,23 +361,15 @@ func (s *Screen) heartbeatLoop() {
 
 func (s *Screen) enableRawMode() {
 	fd := int(os.Stdin.Fd())
-	termios, err := unix.IoctlGetTermios(fd, unix.TCGETS)
+	state, err := term.MakeRaw(fd)
 	if err != nil {
 		log.Fatalf("Failed to get terminal state: %v", err)
 	}
-	s.origTermios = *termios
-
-	raw := *termios
-	raw.Lflag &^= unix.ECHO | unix.ICANON | unix.ISIG
-	raw.Cc[unix.VMIN] = 1
-	raw.Cc[unix.VTIME] = 0
-
-	if err := unix.IoctlSetTermios(fd, unix.TCSETS, &raw); err != nil {
-		log.Fatalf("Failed to set raw mode: %v", err)
-	}
+	s.origState = state
 }
 
 func (s *Screen) disableRawMode() {
-	fd := int(os.Stdin.Fd())
-	unix.IoctlSetTermios(fd, unix.TCSETS, &s.origTermios)
+	if s.origState != nil {
+		term.Restore(int(os.Stdin.Fd()), s.origState)
+	}
 }
