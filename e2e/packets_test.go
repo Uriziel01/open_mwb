@@ -43,6 +43,12 @@ func TestMousePacketRoundtrip(t *testing.T) {
 	if got.Header.Id != sent.Header.Id {
 		t.Errorf("Id = %d, want %d", got.Header.Id, sent.Header.Id)
 	}
+	if got.Header.Src != testClientID {
+		t.Errorf("Src = %d, want %d", got.Header.Src, testClientID)
+	}
+	if got.Header.Des != testServerID {
+		t.Errorf("Des = %d, want %d", got.Header.Des, testServerID)
+	}
 	if got.Mouse == nil {
 		t.Fatal("Mouse data is nil")
 	}
@@ -55,9 +61,13 @@ func TestMousePacketRoundtrip(t *testing.T) {
 	if got.Mouse.WheelDelta != sent.Mouse.WheelDelta {
 		t.Errorf("Mouse.WheelDelta = %d, want %d", got.Mouse.WheelDelta, sent.Mouse.WheelDelta)
 	}
+	if got.Mouse.Flags != sent.Mouse.Flags {
+		t.Errorf("Mouse.Flags = %d, want %d", got.Mouse.Flags, sent.Mouse.Flags)
+	}
 }
 
-// TestKeyboardPacketRoundtrip sends a Keyboard packet and verifies Vk and Flags.
+// TestKeyboardPacketRoundtrip sends a Keyboard packet and verifies Vk, Flags,
+// DateTime and all header fields.
 func TestKeyboardPacketRoundtrip(t *testing.T) {
 	pair := NewConnectedPair(t, testKey, testClientID, testServerID)
 	t.Cleanup(pair.Close)
@@ -91,6 +101,18 @@ func TestKeyboardPacketRoundtrip(t *testing.T) {
 	if got.Header.Type != protocol.Keyboard {
 		t.Errorf("Type = %d, want %d", got.Header.Type, protocol.Keyboard)
 	}
+	if got.Header.Id != sent.Header.Id {
+		t.Errorf("Id = %d, want %d", got.Header.Id, sent.Header.Id)
+	}
+	if got.Header.Src != testClientID {
+		t.Errorf("Src = %d, want %d", got.Header.Src, testClientID)
+	}
+	if got.Header.Des != testServerID {
+		t.Errorf("Des = %d, want %d", got.Header.Des, testServerID)
+	}
+	if got.Header.DateTime != sent.Header.DateTime {
+		t.Errorf("DateTime = %d, want %d", got.Header.DateTime, sent.Header.DateTime)
+	}
 	if got.Keyboard == nil {
 		t.Fatal("Keyboard data is nil")
 	}
@@ -103,7 +125,7 @@ func TestKeyboardPacketRoundtrip(t *testing.T) {
 }
 
 // TestHeartbeatRoundtrip sends a Heartbeat packet (big packet with machine name)
-// and verifies the type and machine name survive the round-trip.
+// and verifies the type, Id, Src/Des and machine name survive the round-trip.
 func TestHeartbeatRoundtrip(t *testing.T) {
 	pair := NewConnectedPair(t, testKey, testClientID, testServerID)
 	t.Cleanup(pair.Close)
@@ -131,6 +153,15 @@ func TestHeartbeatRoundtrip(t *testing.T) {
 	if got.Header.Type != protocol.Heartbeat {
 		t.Errorf("Type = %d, want %d", got.Header.Type, protocol.Heartbeat)
 	}
+	if got.Header.Id != sent.Header.Id {
+		t.Errorf("Id = %d, want %d", got.Header.Id, sent.Header.Id)
+	}
+	if got.Header.Src != testClientID {
+		t.Errorf("Src = %d, want %d", got.Header.Src, testClientID)
+	}
+	if got.Header.Des != testServerID {
+		t.Errorf("Des = %d, want %d", got.Header.Des, testServerID)
+	}
 	if got.MachineName != name {
 		t.Errorf("MachineName = %q, want %q", got.MachineName, name)
 	}
@@ -142,7 +173,8 @@ func TestHeartbeatRoundtrip(t *testing.T) {
 // Protocol note: ClipboardText is a 64-byte "big" packet. The Raw payload is
 // stored at bytes 24-31 (8 bytes) and the MachineName at bytes 32-63. Larger
 // clipboard content requires a higher-level chunking protocol (not yet
-// implemented). This test validates the fundamental send/receive path.
+// implemented). This test validates the fundamental send/receive path for
+// short payloads that fit in the Raw region.
 func TestClipboardTextRoundtrip(t *testing.T) {
 	pair := NewConnectedPair(t, testKey, testClientID, testServerID)
 	t.Cleanup(pair.Close)
@@ -173,6 +205,12 @@ func TestClipboardTextRoundtrip(t *testing.T) {
 
 	if got.Header.Type != protocol.ClipboardText {
 		t.Errorf("Type = %d, want %d", got.Header.Type, protocol.ClipboardText)
+	}
+	if got.Header.Id != sent.Header.Id {
+		t.Errorf("Id = %d, want %d", got.Header.Id, sent.Header.Id)
+	}
+	if got.Header.Src != testClientID {
+		t.Errorf("Src = %d, want %d", got.Header.Src, testClientID)
 	}
 	if got.Raw == nil {
 		t.Fatal("Raw is nil")
@@ -235,5 +273,47 @@ func TestBidirectional(t *testing.T) {
 	}
 	if fromServer.Mouse.X != 300 || fromServer.Mouse.Y != 400 {
 		t.Errorf("client received X=%d Y=%d, want X=300 Y=400", fromServer.Mouse.X, fromServer.Mouse.Y)
+	}
+}
+
+// TestHideMouseRoundtrip exercises the default Marshal/Unmarshal branch
+// (small packet, DateTime + no typed payload) using the HideMouse packet type.
+func TestHideMouseRoundtrip(t *testing.T) {
+	pair := NewConnectedPair(t, testKey, testClientID, testServerID)
+	t.Cleanup(pair.Close)
+
+	sent := &protocol.GenericData{
+		Header: protocol.Header{
+			Type:     protocol.HideMouse,
+			Id:       77,
+			Src:      testClientID,
+			Des:      testServerID,
+			DateTime: 999888777,
+		},
+	}
+
+	if err := pair.Client.Send(sent); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+
+	got := receiveWithTimeout(t, pair.Server, 2*time.Second)
+	if got == nil {
+		t.Fatal("received nil packet")
+	}
+
+	if got.Header.Type != protocol.HideMouse {
+		t.Errorf("Type = %d, want %d", got.Header.Type, protocol.HideMouse)
+	}
+	if got.Header.Id != sent.Header.Id {
+		t.Errorf("Id = %d, want %d", got.Header.Id, sent.Header.Id)
+	}
+	if got.Header.Src != testClientID {
+		t.Errorf("Src = %d, want %d", got.Header.Src, testClientID)
+	}
+	if got.Header.Des != testServerID {
+		t.Errorf("Des = %d, want %d", got.Header.Des, testServerID)
+	}
+	if got.Header.DateTime != sent.Header.DateTime {
+		t.Errorf("DateTime = %d, want %d", got.Header.DateTime, sent.Header.DateTime)
 	}
 }

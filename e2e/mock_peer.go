@@ -43,25 +43,33 @@ func NewConnectedPair(t *testing.T, key string, clientID, serverID uint32) *Conn
 	ln.Close()
 	mwbPort := actualPort - 1 // network pkg will do +1 internally
 
-	// Start the server side in a goroutine.
+	// readyCh signals that the server has bound its listener and is safe to
+	// dial. A non-nil error means NewServer itself failed.
+	readyCh := make(chan error, 1)
+
 	type serverResult struct {
 		client *network.Client
 		srv    *network.Server
 		err    error
 	}
 	ch := make(chan serverResult, 1)
+
 	go func() {
 		srv, err := network.NewServer(mwbPort, key, serverID, serverName, false)
 		if err != nil {
-			ch <- serverResult{err: err}
+			readyCh <- err
 			return
 		}
+		readyCh <- nil // listener is up; client may dial now
 		c, err := srv.Accept()
 		ch <- serverResult{client: c, srv: srv, err: err}
 	}()
 
-	// Give the server goroutine a moment to bind before we dial.
-	time.Sleep(20 * time.Millisecond)
+	// Block until the server is listening (or reports a startup error).
+	if err := <-readyCh; err != nil {
+		t.Fatalf("NewConnectedPair: server start: %v", err)
+		return nil
+	}
 
 	// Connect the client side using the real network.Connect (CBC primer + handshake).
 	clientConn, err := network.Connect("127.0.0.1", mwbPort, key, clientID, clientName, false)

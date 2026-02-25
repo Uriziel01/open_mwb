@@ -1,7 +1,11 @@
 package e2e
 
 import (
+	"net"
 	"testing"
+	"time"
+
+	"open-mwb/network"
 )
 
 const (
@@ -35,5 +39,51 @@ func TestHandshakeMachineNames(t *testing.T) {
 	}
 	if pair.Server.MachineName != "test-server" {
 		t.Errorf("server.MachineName = %q, want %q", pair.Server.MachineName, "test-server")
+	}
+}
+
+// TestWrongKeyRejected verifies that a client connecting with a mismatched
+// security key cannot complete the handshake. The magic-number or checksum
+// validation in Unmarshal must reject the corrupted packets, causing Connect
+// to return a non-nil error.
+func TestWrongKeyRejected(t *testing.T) {
+	// Grab a free port.
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("find free port: %v", err)
+	}
+	actualPort := ln.Addr().(*net.TCPAddr).Port
+	ln.Close()
+	mwbPort := actualPort - 1
+
+	// Start a server with the correct key.
+	readyCh := make(chan error, 1)
+	go func() {
+		srv, err := network.NewServer(mwbPort, testKey, testServerID, "test-server", false)
+		if err != nil {
+			readyCh <- err
+			return
+		}
+		readyCh <- nil // listening
+		// Accept (and discard) the connection attempt; the server loop will
+		// return an error from the failed handshake and continue waiting, so
+		// we just close the server to unblock it.
+		srv.Accept() //nolint:errcheck
+		srv.Close()
+	}()
+
+	if err := <-readyCh; err != nil {
+		t.Fatalf("server start: %v", err)
+	}
+
+	// Give the server goroutine a moment to reach Accept before we dial.
+	// (This is a tiny window needed only because Accept blocks synchronously.)
+	time.Sleep(5 * time.Millisecond)
+
+	// Dial with a wrong key — the handshake must fail.
+	const wrongKey = "WrongSecurityKey!"
+	_, err = network.Connect("127.0.0.1", mwbPort, wrongKey, testClientID, "bad-client", false)
+	if err == nil {
+		t.Fatal("Connect with wrong key should have returned an error")
 	}
 }
