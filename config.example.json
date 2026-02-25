@@ -1,0 +1,9 @@
+{
+    "key": "CHANGE_ME_16CHARS",
+    "remote": "192.168.1.100",
+    "edge": "right",
+    "mode": "client",
+    "id": 1001,
+    "name": "MY-LINUX-PC",
+    "debug": false
+}

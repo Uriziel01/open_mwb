@@ -1,12 +1,17 @@
 package config
 
 import (
+	"bufio"
+	"crypto/rand"
+	"encoding/binary"
 	"encoding/json"
 	"flag"
 	"fmt"
 	"log"
+	"math/big"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 // Config holds the runtime configuration for MWB Linux.
@@ -89,6 +94,173 @@ func (c *Config) loadFromJSON() bool {
 	return false
 }
 
+// saveToJSON writes the config to config.json next to the binary (fallback: CWD).
+// Only the fields collected during onboarding are persisted; everything else
+// stays at its runtime default so the file stays minimal.
+func (c *Config) saveToJSON() error {
+	// Prefer to save next to the binary
+	savePath := "config.json"
+	if exe, err := os.Executable(); err == nil {
+		savePath = filepath.Join(filepath.Dir(exe), "config.json")
+	}
+
+	// Use a minimal struct — mirrors config.example.json
+	slim := struct {
+		Key    string `json:"key"`
+		Remote string `json:"remote"`
+		Edge   string `json:"edge"`
+		Mode   string `json:"mode"`
+		ID     uint32 `json:"id"`
+		Name   string `json:"name"`
+		Debug  bool   `json:"debug"`
+	}{
+		Key:    c.SecurityKey,
+		Remote: c.RemoteAddress,
+		Edge:   c.Edge,
+		Mode:   c.Mode,
+		ID:     c.MachineID,
+		Name:   c.MachineName,
+		Debug:  false,
+	}
+
+	data, err := json.MarshalIndent(slim, "", "    ")
+	if err != nil {
+		return fmt.Errorf("marshal: %w", err)
+	}
+	if err := os.WriteFile(savePath, data, 0600); err != nil {
+		return fmt.Errorf("write %s: %w", savePath, err)
+	}
+
+	absPath, _ := filepath.Abs(savePath)
+	fmt.Printf("✓ Config saved to %s\n\n", absPath)
+	return nil
+}
+
+// randomKey generates a 16-character random alphanumeric string.
+func randomKey() string {
+	const charset = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+	b := make([]byte, 16)
+	for i := range b {
+		n, _ := rand.Int(rand.Reader, big.NewInt(int64(len(charset))))
+		b[i] = charset[n.Int64()]
+	}
+	return string(b)
+}
+
+// randomID generates a random non-zero uint32.
+func randomID() uint32 {
+	var buf [4]byte
+	rand.Read(buf[:])
+	id := binary.BigEndian.Uint32(buf[:])
+	if id == 0 {
+		id = 1
+	}
+	return id
+}
+
+// prompt prints a question and reads a trimmed line from stdin.
+func prompt(reader *bufio.Reader, question string) string {
+	fmt.Print(question)
+	line, _ := reader.ReadString('\n')
+	return strings.TrimSpace(line)
+}
+
+// promptDefault returns a default if the user presses Enter.
+func promptDefault(reader *bufio.Reader, question, defaultVal string) string {
+	val := prompt(reader, question)
+	if val == "" {
+		return defaultVal
+	}
+	return val
+}
+
+// runOnboarding interactively fills in required config values and saves config.json.
+func (c *Config) runOnboarding() {
+	fmt.Println()
+	fmt.Println("╔══════════════════════════════════════════╗")
+	fmt.Println("║        open-mwb  —  First Run Setup      ║")
+	fmt.Println("║  No config.json found. Let's create one. ║")
+	fmt.Println("╚══════════════════════════════════════════╝")
+	fmt.Println()
+
+	reader := bufio.NewReader(os.Stdin)
+
+	// --- Security key ---
+	key := prompt(reader, "Security key (Enter to generate random): ")
+	if key == "" {
+		key = randomKey()
+		fmt.Printf("  → Generated key: %s\n", key)
+	}
+	c.SecurityKey = key
+
+	// --- Machine ID ---
+	var machineID uint32
+	for {
+		raw := prompt(reader, "Machine ID / uint32 (Enter to generate random): ")
+		if raw == "" {
+			machineID = randomID()
+			fmt.Printf("  → Generated ID: %d\n", machineID)
+			break
+		}
+		var n uint32
+		if _, err := fmt.Sscanf(raw, "%d", &n); err != nil || n == 0 {
+			fmt.Println("  Please enter a positive integer or press Enter.")
+			continue
+		}
+		machineID = n
+		break
+	}
+	c.MachineID = machineID
+
+	// --- Remote IP ---
+	for {
+		remote := prompt(reader, "Remote Windows machine IP / hostname: ")
+		if remote == "" {
+			fmt.Println("  Remote address is required, please enter a value.")
+			continue
+		}
+		c.RemoteAddress = remote
+		break
+	}
+
+	// --- Edge ---
+	validEdges := map[string]bool{"left": true, "right": true, "top": true, "bottom": true}
+	for {
+		edge := promptDefault(reader, "Edge where Windows screen is (left/right/top/bottom) [right]: ", "right")
+		if !validEdges[edge] {
+			fmt.Println("  Must be one of: left, right, top, bottom")
+			continue
+		}
+		c.Edge = edge
+		break
+	}
+
+	// --- Mode ---
+	validModes := map[string]bool{"client": true, "server": true, "tui": true}
+	for {
+		mode := promptDefault(reader, "Mode (client/server/tui) [client]: ", "client")
+		if !validModes[mode] {
+			fmt.Println("  Must be one of: client, server, tui")
+			continue
+		}
+		c.Mode = mode
+		break
+	}
+
+	// --- Machine name ---
+	hostname, _ := os.Hostname()
+	defaultName := hostname
+	name := promptDefault(reader, fmt.Sprintf("This machine's name [%s]: ", defaultName), defaultName)
+	c.MachineName = name
+
+	fmt.Println()
+
+	// Save to disk
+	if err := c.saveToJSON(); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: could not save config.json: %v\n", err)
+	}
+}
+
 // Parse loads config from JSON first, then applies CLI flag overrides.
 func Parse() *Config {
 	c := &Config{
@@ -125,8 +297,10 @@ func Parse() *Config {
 	// Load config file path from flag first
 	c.ConfigFile = *flagConfig
 
-	// Load JSON config (sets base values)
-	c.loadFromJSON()
+	// Load JSON config (sets base values); if not found, run onboarding
+	if !c.loadFromJSON() {
+		c.runOnboarding()
+	}
 
 	// Apply CLI flag overrides (only if explicitly set)
 	flag.Visit(func(f *flag.Flag) {
@@ -202,14 +376,15 @@ Usage:
 
 Config is loaded from config.json (auto-detected next to binary, in cwd,
 or in parent dir). CLI flags override config.json values.
+If no config.json is found, an interactive setup wizard will run.
 
 config.json example:
   {
     "key": "YourSecurityKey",
     "remote": "192.168.1.100",
     "edge": "right",
-    "mode": "tui",
-    "id": 2
+    "mode": "client",
+    "id": 1001
   }
 
 Options:
