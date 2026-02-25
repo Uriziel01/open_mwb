@@ -55,6 +55,7 @@ func (s *Server) Accept() (*Client, error) {
 			Conn:        conn,
 			Cipher:      cipher,
 			MagicNumber: s.mwbCrypto.MagicNumber,
+			MachineID:   s.machineID,
 			Debug:       s.debug,
 			MachineName: s.machineName,
 		}

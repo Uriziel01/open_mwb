@@ -9,15 +9,18 @@ import (
 
 type PackageType uint32
 
+// Values must match C# PackageType.cs exactly!
 const (
-	Invalid        PackageType = 0
-	Cycled         PackageType = 1
+	Hi             PackageType = 2
+	Hello          PackageType = 3
+	ByeBye         PackageType = 4
 	Heartbeat      PackageType = 20
-	Heartbeat_ex   PackageType = 99
 	Awake          PackageType = 21
-	Hello          PackageType = 24
-	ByeBye         PackageType = 25
+	HideMouse      PackageType = 50
+	Heartbeat_ex   PackageType = 51
 	Clipboard      PackageType = 69
+	ClipboardDataEnd PackageType = 76
+	MachineSwitched PackageType = 77
 	ClipboardAsk   PackageType = 78
 	ClipboardPush  PackageType = 79
 	NextMachine    PackageType = 121
@@ -28,6 +31,8 @@ const (
 	Handshake      PackageType = 126
 	HandshakeAck   PackageType = 127
 	Matrix         PackageType = 128
+	Invalid        PackageType = 0xFF // 255
+	Error          PackageType = 0xFE // 254
 )
 
 const (
@@ -91,7 +96,7 @@ func IsBigPackage(t PackageType) bool {
 	case Hello, Awake, Heartbeat, Heartbeat_ex,
 		Handshake, HandshakeAck,
 		ClipboardPush, Clipboard, ClipboardAsk,
-		ClipboardImage, ClipboardText:
+		ClipboardImage, ClipboardText, ClipboardDataEnd:
 		return true
 	default:
 		return (t & Matrix) == Matrix
@@ -180,9 +185,13 @@ func Marshal(data *GenericData, magicNumber uint32, debug bool) ([]byte, error) 
 	buf[1] = checksum
 
 	if debug {
-		log.Printf("[protocol] SEND type=%d(0x%02X) id=%d src=%d des=%d magic=0x%08X chk=0x%02X size=%d",
+		log.Printf("[protocol] SEND type=%d(0x%02X) id=%d src=%d des=%d magic=0x%08X chk=0x%02X size=%d name=%q",
 			data.Header.Type, buf[0], data.Header.Id, data.Header.Src, data.Header.Des,
-			magicNumber, checksum, size)
+			magicNumber, checksum, size, data.MachineName)
+		if size == PackageSizeEx {
+			log.Printf("[protocol] SEND bytes[32:48] = %x", buf[32:48])
+			log.Printf("[protocol] SEND bytes[48:64] = %x", buf[48:64])
+		}
 	}
 
 	return buf, nil

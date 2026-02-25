@@ -42,10 +42,44 @@ func main() {
 	var client *network.Client
 	var err error
 
+	// MWB requires reciprocal connections to establish full trust (green status).
+	// We MUST start the server concurrently so Windows can connect back.
+	if cfg.Mode == "client" || cfg.Mode == "tui" {
+		log.Printf("Starting background Server on port %d to accept reciprocal connections...", cfg.ListenPort+1)
+		server, err := network.NewServer(cfg.ListenPort, cfg.SecurityKey, cfg.MachineID, cfg.MachineName, cfg.Debug)
+		if err != nil {
+			log.Printf("Warning: Background server failed to start: %v", err)
+		} else {
+			go func() {
+				defer server.Close()
+				for {
+					windowsClient, err := server.Accept()
+					if err != nil {
+						log.Printf("Background server accept error: %v", err)
+						return
+					}
+					log.Printf("Accepted reciprocal connection from Windows MWB (%s)", windowsClient.MachineName)
+					
+					// Keep the reciprocal connection alive and read from it
+					go func(c *network.Client) {
+						defer c.Conn.Close()
+						for {
+							_, err := c.Receive()
+							if err != nil {
+								log.Printf("Reciprocal connection closed: %v", err)
+								return
+							}
+						}
+					}(windowsClient)
+				}
+			}()
+		}
+	}
+
 	switch cfg.Mode {
 	case "client", "tui":
 		log.Printf("Connecting to Windows MWB at %s:%d...", cfg.RemoteAddress, cfg.ListenPort+1)
-		client, err = network.Connect(cfg.RemoteAddress, cfg.ListenPort, cfg.SecurityKey, cfg.MachineName, cfg.Debug)
+		client, err = network.Connect(cfg.RemoteAddress, cfg.ListenPort, cfg.SecurityKey, cfg.MachineID, cfg.MachineName, cfg.Debug)
 		if err != nil {
 			log.Fatalf("Connection failed: %v", err)
 		}

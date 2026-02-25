@@ -17,24 +17,36 @@ type Client struct {
 	Conn        net.Conn
 	Cipher      *crypto.StreamCipher
 	MagicNumber uint32
+	MachineID   uint32
 	Debug       bool
 	MachineName string
 }
 
-func Connect(address string, port int, securityKey string, machineName string, debug bool) (*Client, error) {
+func Connect(address string, port int, securityKey string, machineID uint32, machineName string, debug bool) (*Client, error) {
 	connectPort := port + 1
 
 	log.Printf("[connect] Dialing %s:%d...", address, connectPort)
-	conn, err := net.DialTimeout("tcp", fmt.Sprintf("%s:%d", address, connectPort), 5*time.Second)
+	conn, err := net.DialTimeout("tcp4", fmt.Sprintf("%s:%d", address, connectPort), 5*time.Second)
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to MWB at %s:%d: %w", address, connectPort, err)
 	}
 
 	mc := crypto.NewMWBCrypto(securityKey)
+
+	// Match C#'s socket options (SocketStuff.cs line 1283-1286):
+	// SendBufferSize = PACKAGE_SIZE * 10000, ReceiveBufferSize = PACKAGE_SIZE * 10000
+	// NoDelay = true, SendTimeout = 500
+	if tcpConn, ok := conn.(*net.TCPConn); ok {
+		tcpConn.SetNoDelay(true)
+		tcpConn.SetWriteBuffer(32 * 10000) // 320KB
+		tcpConn.SetReadBuffer(32 * 10000)  // 320KB
+	}
+
 	c := &Client{
 		Conn:        conn,
 		Cipher:      mc.NewStreamCipher(debug),
 		MagicNumber: mc.MagicNumber,
+		MachineID:   machineID,
 		Debug:       debug,
 		MachineName: machineName,
 	}
@@ -77,7 +89,7 @@ func (c *Client) handshake() error {
 		Header: protocol.Header{
 			Type: protocol.Handshake,
 			Id:   1,
-			Src:  0, // ID.NONE during handshake
+			Src:  c.MachineID, // C# auto-fills Src with MachineID in TcpSend
 		},
 		Handshake: &protocol.HandshakeData{
 			Machine1: ourM1,
@@ -133,7 +145,7 @@ func (c *Client) handshake() error {
 					Header: protocol.Header{
 						Type: protocol.HandshakeAck,
 						Id:   pkt.Header.Id,
-						Src:  0, // ID.NONE
+						Src:  c.MachineID, // C# auto-fills Src
 					},
 					Handshake: &protocol.HandshakeData{
 						Machine1: ^pkt.Handshake.Machine1,
@@ -206,7 +218,18 @@ func (c *Client) readPacket() (*protocol.GenericData, error) {
 }
 
 // Send sends a generic data packet encrypted over the TCP socket.
+// Matches C#'s TcpSend + SendPackage: auto-fills Src and MachineName.
 func (c *Client) Send(data *protocol.GenericData) error {
+	if data.Header.Src == 0 {
+		data.Header.Src = c.MachineID
+	}
+	// C#'s SendPackage sets MachineName on EVERY packet.
+	// This is critical for big packets (heartbeat, hello, etc.) since
+	// the name field at offset 32-63 would otherwise be null bytes.
+	if data.MachineName == "" && c.MachineName != "" {
+		data.MachineName = c.MachineName
+	}
+
 	plainBytes, err := protocol.Marshal(data, c.MagicNumber, c.Debug)
 	if err != nil {
 		return err
