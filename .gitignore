@@ -1,3 +1,5 @@
+pkg/
+
 # Local config (contains security key)
 config.json
 
