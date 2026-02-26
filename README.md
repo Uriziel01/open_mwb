@@ -49,6 +49,17 @@ go build -o open-mwb .
 GOOS=windows go build -o open-mwb.exe .
 ```
 
+If you can use distrobox, you can use the file `distrobox.ini` to build and run the project.
+
+```bash
+distrobox assemble create --file distrobox.ini
+```
+
+```bash
+distrobox enter mwb-dev -- go build -o open-mwb .
+distrobox enter mwb-dev -- sudo -E ./open-mwb
+```
+
 ### Configure
 
 Create a `config.json` next to the binary (or in the working directory):
