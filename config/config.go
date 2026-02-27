@@ -291,7 +291,6 @@ func Parse() *Config {
 	)
 	flag.BoolVar(&c.ListDevices, "list-devices", false, "List all /dev/input devices and exit")
 	flag.BoolVar(&c.ShowVersion, "version", false, "Print version and exit")
-	flag.BoolVar(&c.Demo, "demo", false, "Demo mode: test virtual input without MWB connection")
 
 	flag.Parse()
 
