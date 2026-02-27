@@ -1,8 +1,6 @@
 package main
 
-
 import (
-	"flag"
 	"fmt"
 	"log"
 	"os"
@@ -46,70 +44,11 @@ func main() {
 	log.Printf("Mode: %s | Edge: %s | Screen: %dx%d | MachineID: %d",
 		cfg.Mode, cfg.Edge, cfg.ScreenWidth, cfg.ScreenHeight, cfg.MachineID)
 
-	// ---- Connect to or listen for Windows MWB ----
-	var client *network.Client
-	var err error
-
-	// MWB requires reciprocal connections to establish full trust (green status).
-	// We MUST start the server concurrently so Windows can connect back.
-	if cfg.Mode == "client" || cfg.Mode == "tui" {
-		log.Printf("Starting background Server on port %d to accept reciprocal connections...", cfg.ListenPort+1)
-		server, err := network.NewServer(cfg.ListenPort, cfg.SecurityKey, cfg.MachineID, cfg.MachineName, cfg.Debug)
-		if err != nil {
-			log.Printf("Warning: Background server failed to start: %v", err)
-		} else {
-			go func() {
-				defer server.Close()
-				for {
-					windowsClient, err := server.Accept()
-					if err != nil {
-						log.Printf("Background server accept error: %v", err)
-						return
-					}
-					log.Printf("Accepted reciprocal connection from Windows MWB (%s)", windowsClient.MachineName)
-					
-					// Keep the reciprocal connection alive and read from it
-					go func(c *network.Client) {
-						defer c.Conn.Close()
-						for {
-							_, err := c.Receive()
-							if err != nil {
-								log.Printf("Reciprocal connection closed: %v", err)
-								return
-							}
-						}
-					}(windowsClient)
-				}
-			}()
-		}
+	client, err := connectClient(cfg)
+	if err != nil {
+		log.Fatalf("Connection failed: %v", err)
 	}
 
-	switch cfg.Mode {
-	case "client", "tui":
-		log.Printf("Connecting to Windows MWB at %s:%d...", cfg.RemoteAddress, cfg.ListenPort+1)
-		client, err = network.Connect(cfg.RemoteAddress, cfg.ListenPort, cfg.SecurityKey, cfg.MachineID, cfg.MachineName, cfg.Debug)
-		if err != nil {
-			log.Fatalf("Connection failed: %v", err)
-		}
-		log.Println("Connected and handshake complete!")
-	case "server":
-		log.Printf("Starting server on port %d, waiting for Windows MWB...", cfg.ListenPort+1)
-		server, err := network.NewServer(cfg.ListenPort, cfg.SecurityKey, cfg.MachineID, cfg.MachineName, cfg.Debug)
-		if err != nil {
-			log.Fatalf("Server start failed: %v", err)
-		}
-		defer server.Close()
-
-		client, err = server.Accept()
-		if err != nil {
-			log.Fatalf("Accept failed: %v", err)
-		}
-		log.Println("Windows MWB connected and handshake complete!")
-	default:
-		log.Fatalf("Unknown mode: %s (use client, server, or tui)", cfg.Mode)
-	}
-
-	// ---- TUI mode: launch debug screen and return ----
 	if cfg.Mode == "tui" {
 		screen := tui.New(60, 20, cfg.Edge, client, cfg.MachineID, client.RemoteMachineID, cfg.Debug)
 		screen.Run()
@@ -117,27 +56,114 @@ func main() {
 		return
 	}
 
-	// ---- Setup virtual input devices (for injecting remote input) ----
-	vInput, err := input.NewVirtualInput(cfg.ScreenWidth, cfg.ScreenHeight)
+	vi, err := input.NewVirtualInput(cfg.ScreenWidth, cfg.ScreenHeight)
 	if err != nil {
-		log.Fatalf("Failed to create virtual input devices: %v", err)
+		log.Fatalf("Failed to create virtual input: %v", err)
 	}
-	defer vInput.Close()
+	defer vi.Close()
 
-	// ---- Setup evdev capture (for capturing local input) ----
+	evdev := setupInputCapture(cfg, client)
+	defer evdev.Close()
+
+	clip := clipboard.New()
+	setupClipboard(clip, client, cfg)
+
+	go evdev.RunMouseLoop()
+	go evdev.RunKeyboardLoop()
+	go clip.Watch()
+	go sendHeartbeats(client, cfg)
+	go receiveLoop(client, vi, clip, cfg.Debug)
+
+	log.Println("")
+	log.Println("Ready! Move your mouse to the screen edge to switch.")
+	log.Println("Press ScrollLock to return input to this machine.")
+	log.Println("Press Ctrl+C to quit.")
+
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	<-sigCh
+
+	log.Println("Shutting down...")
+	clip.Stop()
+}
+
+func connectClient(cfg *config.Config) (*network.Client, error) {
+	if cfg.Mode == "client" || cfg.Mode == "tui" {
+		server, err := network.NewServer(cfg.ListenPort, cfg.SecurityKey, cfg.MachineID, cfg.MachineName, cfg.Debug)
+		if err != nil {
+			log.Printf("Warning: Background server failed to start: %v", err)
+		} else {
+			go runBackgroundServer(server)
+		}
+	}
+
+	switch cfg.Mode {
+	case "client", "tui":
+		log.Printf("Connecting to Windows MWB at %s:%d...", cfg.RemoteAddress, cfg.ListenPort+1)
+		client, err := network.Connect(cfg.RemoteAddress, cfg.ListenPort, cfg.SecurityKey, cfg.MachineID, cfg.MachineName, cfg.Debug)
+		if err != nil {
+			return nil, err
+		}
+		log.Println("Connected and handshake complete!")
+		return client, nil
+
+	case "server":
+		log.Printf("Starting server on port %d...", cfg.ListenPort+1)
+		server, err := network.NewServer(cfg.ListenPort, cfg.SecurityKey, cfg.MachineID, cfg.MachineName, cfg.Debug)
+		if err != nil {
+			return nil, fmt.Errorf("server start failed: %w", err)
+		}
+		defer server.Close()
+
+		client, err := server.Accept()
+		if err != nil {
+			return nil, fmt.Errorf("accept failed: %w", err)
+		}
+		log.Println("Windows MWB connected!")
+		return client, nil
+
+	default:
+		return nil, fmt.Errorf("unknown mode: %s", cfg.Mode)
+	}
+}
+
+func runBackgroundServer(server *network.Server) {
+	defer server.Close()
+	for {
+		client, err := server.Accept()
+		if err != nil {
+			log.Printf("Background server accept error: %v", err)
+			return
+		}
+		log.Printf("Accepted reciprocal connection from %s", client.MachineName)
+		go func(c *network.Client) {
+			defer c.Conn.Close()
+			for {
+				_, err := c.Receive()
+				if err != nil {
+					return
+				}
+			}
+		}(client)
+	}
+}
+
+func setupInputCapture(cfg *config.Config, client *network.Client) *input.EvdevCapture {
 	mouseDev := cfg.MouseDevice
 	if mouseDev == "" {
+		var err error
 		mouseDev, err = input.FindMouseDevice()
 		if err != nil {
-			log.Fatalf("Failed to find mouse device: %v (use --mouse to specify manually, or --list-devices to see available)", err)
+			log.Fatalf("Failed to find mouse: %v", err)
 		}
 	}
 
 	kbdDev := cfg.KeyboardDevice
 	if kbdDev == "" {
+		var err error
 		kbdDev, err = input.FindKeyboardDevice()
 		if err != nil {
-			log.Fatalf("Failed to find keyboard device: %v (use --keyboard to specify manually, or --list-devices to see available)", err)
+			log.Fatalf("Failed to find keyboard: %v", err)
 		}
 	}
 
@@ -148,12 +174,71 @@ func main() {
 	if err := evdev.Open(mouseDev, kbdDev); err != nil {
 		log.Fatalf("Failed to open input devices: %v", err)
 	}
-	defer evdev.Close()
 
-	// ---- Setup clipboard ----
-	clip := clipboard.New()
+	var sendMu sync.Mutex
+	packetID := uint32(100)
+	nextID := func() uint32 {
+		sendMu.Lock()
+		defer sendMu.Unlock()
+		packetID++
+		return packetID
+	}
 
-	// ---- Wire up callbacks ----
+	cursorX, cursorY := int32(32768), int32(32768)
+
+	evdev.OnEdgeHit = func() {
+		log.Println("[main] Edge hit - forwarding to remote")
+	}
+
+	evdev.OnReturn = func() {
+		log.Println("[main] Returning to local")
+	}
+
+	evdev.OnMouseEvent = func(dx, dy, wheel int) {
+		if wheel == 0 {
+			cursorX += int32(dx * 40)
+			cursorY += int32(dy * 40)
+			cursorX = clamp(cursorX, 0, 65535)
+			cursorY = clamp(cursorY, 0, 65535)
+		}
+
+		flags := input.WM_MOUSEMOVE
+		if wheel != 0 {
+			flags = input.WM_MOUSEWHEEL
+		}
+
+		sendPacket(client, nextID(), cfg.MachineID, client.RemoteMachineID, protocol.Mouse, sendMu,
+			&protocol.MouseData{X: cursorX, Y: cursorY, WheelDelta: int32(wheel), Flags: int32(flags)})
+	}
+
+	evdev.OnButtonEvent = func(code uint16, pressed bool) {
+		flags := buttonFlags(code, pressed)
+		if flags == 0 {
+			return
+		}
+		sendPacket(client, nextID(), cfg.MachineID, client.RemoteMachineID, protocol.Mouse, sendMu,
+			&protocol.MouseData{X: cursorX, Y: cursorY, Flags: int32(flags)})
+	}
+
+	evdev.OnKeyEvent = func(code uint16, pressed bool) {
+		vk, ok := input.LinuxToVK[code]
+		if !ok {
+			return
+		}
+
+		flags := input.WM_KEYDOWN
+		if !pressed {
+			flags = input.WM_KEYUP
+		}
+
+		sendPacket(client, nextID(), cfg.MachineID, client.RemoteMachineID, protocol.Keyboard, sendMu,
+			&protocol.KeyboardData{Vk: vk, Flags: int32(flags)})
+	}
+
+	return evdev
+}
+
+func setupClipboard(clip *clipboard.Clipboard, client *network.Client, cfg *config.Config) {
 	var sendMu sync.Mutex
 	packetID := uint32(100)
 
@@ -164,272 +249,127 @@ func main() {
 		return packetID
 	}
 
-	// When mouse hits edge -> we're now forwarding to remote
-	evdev.OnEdgeHit = func() {
-		log.Println("[main] Edge hit - now forwarding input to Windows")
-	}
-
-	// When ScrollLock is pressed -> return to local
-	evdev.OnReturn = func() {
-		log.Println("[main] Returning to local control")
-	}
-
-	var remoteCursorX int32 = 32768
-	var remoteCursorY int32 = 32768
-
-	// Forward mouse movements to Windows
-	evdev.OnMouseEvent = func(dx, dy, wheelDelta int) {
-		flags := int32(input.WM_MOUSEMOVE)
-		if wheelDelta != 0 {
-			flags = input.WM_MOUSEWHEEL
-		}
-
-		if flags == input.WM_MOUSEMOVE {
-			remoteCursorX += int32(dx * 40) // Sensitivity multiplier since 65535 is large
-			remoteCursorY += int32(dy * 40)
-			if remoteCursorX < 0 {
-				remoteCursorX = 0
-			} else if remoteCursorX > 65535 {
-				remoteCursorX = 65535
-			}
-			if remoteCursorY < 0 {
-				remoteCursorY = 0
-			} else if remoteCursorY > 65535 {
-				remoteCursorY = 65535
-			}
-		}
-
-		pkt := &protocol.GenericData{
-			Header: protocol.Header{
-				Type: protocol.Mouse,
-				Id:   nextID(),
-				Src:  cfg.MachineID,
-				Des:  client.RemoteMachineID,
-			},
-			Mouse: &protocol.MouseData{
-				X:          remoteCursorX,
-				Y:          remoteCursorY,
-				WheelDelta: int32(wheelDelta),
-				Flags:      flags,
-			},
-		}
-
-		sendMu.Lock()
-		err := client.Send(pkt)
-		sendMu.Unlock()
-		if err != nil {
-			log.Printf("[main] Failed to send mouse event: %v", err)
-		}
-	}
-
-	// Forward mouse button events to Windows
-	evdev.OnButtonEvent = func(code uint16, pressed bool) {
-		flags := int32(0)
-		switch code {
-		case input.BTN_LEFT:
-			if pressed {
-				flags = input.WM_LBUTTONDOWN
-			} else {
-				flags = input.WM_LBUTTONUP
-			}
-		case input.BTN_RIGHT:
-			if pressed {
-				flags = input.WM_RBUTTONDOWN
-			} else {
-				flags = input.WM_RBUTTONUP
-			}
-		case input.BTN_MIDDLE:
-			if pressed {
-				flags = input.WM_MBUTTONDOWN
-			} else {
-				flags = input.WM_MBUTTONUP
-			}
-		}
-
-		pkt := &protocol.GenericData{
-			Header: protocol.Header{
-				Type: protocol.Mouse,
-				Id:   nextID(),
-				Src:  cfg.MachineID,
-				Des:  client.RemoteMachineID,
-			},
-			Mouse: &protocol.MouseData{
-				X:     remoteCursorX,
-				Y:     remoteCursorY,
-				Flags: flags,
-			},
-		}
-
-		sendMu.Lock()
-		err := client.Send(pkt)
-		sendMu.Unlock()
-		if err != nil {
-			log.Printf("[main] Failed to send button event: %v", err)
-		}
-	}
-
-	// Forward keyboard events to Windows
-	evdev.OnKeyEvent = func(code uint16, pressed bool) {
-		vk, ok := input.LinuxToVK[code]
-		if !ok {
-			return
-		}
-
-		flags := int32(input.WM_KEYDOWN)
-		if !pressed {
-			flags = input.WM_KEYUP
-		}
-
-		pkt := &protocol.GenericData{
-			Header: protocol.Header{
-				Type:     protocol.Keyboard,
-				Id:       nextID(),
-				Src:      cfg.MachineID,
-				Des:      client.RemoteMachineID,
-				DateTime: uint64(time.Now().UnixNano() / 10000),
-			},
-			Keyboard: &protocol.KeyboardData{
-				Vk:    vk,
-				Flags: flags,
-			},
-		}
-
-		sendMu.Lock()
-		err := client.Send(pkt)
-		sendMu.Unlock()
-		if err != nil {
-			log.Printf("[main] Failed to send keyboard event: %v", err)
-		}
-	}
-
-	// Clipboard: when local clipboard changes, send to Windows
 	clip.OnChange = func(content string) {
-		log.Printf("[clipboard] Local clipboard changed (%d chars), sending to Windows", len(content))
+		log.Printf("[clipboard] Sending %d chars", len(content))
+		sendPacket(client, nextID(), cfg.MachineID, client.RemoteMachineID, protocol.ClipboardText, sendMu,
+			[]byte(content))
+	}
+}
 
-		// For text clipboard, we send ClipboardText with the text in Raw
-		textBytes := []byte(content)
-
-		pkt := &protocol.GenericData{
-			Header: protocol.Header{
-				Type:     protocol.ClipboardText,
-				Id:       nextID(),
-				Src:      cfg.MachineID,
-				Des:      client.RemoteMachineID,
-				DateTime: uint64(time.Now().UnixNano() / 10000),
-			},
-			Raw: textBytes,
-		}
-
-		sendMu.Lock()
-		err := client.Send(pkt)
-		sendMu.Unlock()
-		if err != nil {
-			log.Printf("[clipboard] Failed to send clipboard: %v", err)
-		}
+func sendPacket(client *network.Client, id, src, dst uint32, pktType protocol.PackageType, mu sync.Mutex, payload interface{}) {
+	pkt := &protocol.GenericData{
+		Header: protocol.Header{
+			Type:     pktType,
+			Id:       id,
+			Src:      src,
+			Des:      dst,
+			DateTime: uint64(time.Now().UnixNano() / 10000),
+		},
 	}
 
-	// ---- Start goroutines ----
-	go evdev.RunMouseLoop()
-	go evdev.RunKeyboardLoop()
-	go clip.Watch()
+	switch v := payload.(type) {
+	case *protocol.MouseData:
+		pkt.Mouse = v
+	case *protocol.KeyboardData:
+		pkt.Keyboard = v
+	case []byte:
+		pkt.Raw = v
+	}
 
-	// Heartbeat sender
-	go func() {
-		// Windows needs ~10 valid packets before it considers the connection fully alive
-		// and moves past the HandshakeAck phase (it increments `packageCount`).
-		// Send a burst of heartbeats right after connecting to satisfy this.
-		for i := 0; i < 15; i++ {
-			pkt := &protocol.GenericData{
-				Header: protocol.Header{
-					Type:     protocol.Heartbeat,
-					Id:       nextID(),
-					Src:      cfg.MachineID,
-					Des:      client.RemoteMachineID,
-					DateTime: uint64(time.Now().UnixNano() / 10000),
-				},
-				MachineName: cfg.MachineName,
-			}
-			sendMu.Lock()
-			client.Send(pkt)
-			sendMu.Unlock()
-			time.Sleep(100 * time.Millisecond)
+	mu.Lock()
+	err := client.Send(pkt)
+	mu.Unlock()
+	if err != nil {
+		log.Printf("[send] Failed to send %v: %v", pktType, err)
+	}
+}
+
+func sendHeartbeats(client *network.Client, cfg *config.Config) {
+	var sendMu sync.Mutex
+	packetID := uint32(100)
+
+	nextID := func() uint32 {
+		sendMu.Lock()
+		defer sendMu.Unlock()
+		packetID++
+		return packetID
+	}
+
+	for i := 0; i < 15; i++ {
+		sendPacket(client, nextID(), cfg.MachineID, client.RemoteMachineID, protocol.Heartbeat, sendMu, nil)
+		time.Sleep(100 * time.Millisecond)
+	}
+
+	ticker := time.NewTicker(2 * time.Second)
+	defer ticker.Stop()
+	for range ticker.C {
+		sendPacket(client, nextID(), cfg.MachineID, client.RemoteMachineID, protocol.Heartbeat, sendMu, nil)
+	}
+}
+
+func receiveLoop(client *network.Client, vi *input.VirtualInput, clip *clipboard.Clipboard, debug bool) {
+	for {
+		pkt, err := client.Receive()
+		if err != nil {
+			log.Printf("[recv] Error: %v", err)
+			continue
 		}
 
-		// Then fall back to regular 2-second heartbeats
-		ticker := time.NewTicker(2 * time.Second)
-		defer ticker.Stop()
-		for range ticker.C {
-			pkt := &protocol.GenericData{
-				Header: protocol.Header{
-					Type:     protocol.Heartbeat,
-					Id:       nextID(),
-					Src:      cfg.MachineID,
-					Des:      client.RemoteMachineID,
-					DateTime: uint64(time.Now().UnixNano() / 10000),
-				},
-				MachineName: cfg.MachineName,
+		switch pkt.Header.Type {
+		case protocol.Mouse:
+			if pkt.Mouse != nil {
+				vi.InjectMouse(pkt.Mouse.X, pkt.Mouse.Y, pkt.Mouse.WheelDelta, pkt.Mouse.Flags)
 			}
-			sendMu.Lock()
-			client.Send(pkt)
-			sendMu.Unlock()
+
+		case protocol.Keyboard:
+			if pkt.Keyboard != nil {
+				vi.InjectKeyboard(pkt.Keyboard.Vk, pkt.Keyboard.Flags)
+			}
+
+		case protocol.ClipboardText:
+			if pkt.Raw != nil {
+				text := string(pkt.Raw)
+				log.Printf("[recv] Clipboard: %d chars", len(text))
+				clip.SetText(text)
+			}
+
+		case protocol.Matrix, protocol.Heartbeat, protocol.Heartbeat_ex, 
+			protocol.Hi, protocol.HideMouse, protocol.MachineSwitched, 
+			protocol.HandshakeAck:
+			// Silently ignore these common packets
+	}
+}
+
+func buttonFlags(code uint16, pressed bool) int32 {
+	switch code {
+	case input.BTN_LEFT:
+		if pressed {
+			return input.WM_LBUTTONDOWN
 		}
-	}()
-
-	// ---- Main receive loop (incoming from Windows) ----
-	go func() {
-		for {
-			pkt, err := client.Receive()
-			if err != nil {
-				log.Printf("[recv] Error: %v", err)
-				continue
-			}
-
-			switch pkt.Header.Type {
-			case protocol.Mouse:
-				if pkt.Mouse != nil {
-					vInput.InjectMouse(pkt.Mouse.X, pkt.Mouse.Y, pkt.Mouse.WheelDelta, pkt.Mouse.Flags)
-				}
-
-			case protocol.Keyboard:
-				if pkt.Keyboard != nil {
-					vInput.InjectKeyboard(pkt.Keyboard.Vk, pkt.Keyboard.Flags)
-				}
-
-			case protocol.ClipboardText:
-				if pkt.Raw != nil {
-					text := string(pkt.Raw)
-					log.Printf("[recv] Clipboard text from Windows (%d chars)", len(text))
-					clip.SetText(text)
-				}
-
-			case protocol.Heartbeat:
-				// Silently acknowledge
-
-			case protocol.Matrix:
-				log.Printf("[recv] Matrix topology update from Windows")
-
-			default:
-				log.Printf("[recv] Packet type %d (unhandled)", pkt.Header.Type)
-			}
+		return input.WM_LBUTTONUP
+	case input.BTN_RIGHT:
+		if pressed {
+			return input.WM_RBUTTONDOWN
 		}
-	}()
+		return input.WM_RBUTTONUP
+	case input.BTN_MIDDLE:
+		if pressed {
+			return input.WM_MBUTTONDOWN
+		}
+		return input.WM_MBUTTONUP
+	}
+	return 0
+}
 
-	log.Println("")
-	log.Println("Ready! Move your mouse to the screen edge to switch.")
-	log.Println("Press ScrollLock to return input to this machine.")
-	log.Println("Press Ctrl+C to quit.")
+func clamp(v, min, max int32) int32 {
+	if v < min {
+		return min
+	}
+	if v > max {
+		return max
+	}
+	return v
+}
 
-	// Wait for shutdown signal
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
-	<-sigCh
-
-	log.Println("Shutting down...")
-	clip.Stop()
-	evdev.Close()
-	vInput.Close()
-	client.Conn.Close()
-
-	// Workaround: flag.Parse is called in config.Parse, suppress unused import
-	_ = flag.CommandLine
+func runDemo(cfg *config.Config) {
 }

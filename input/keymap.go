@@ -154,7 +154,7 @@ const (
 	WinKeyEventFExtendedKey = 0x0001
 )
 
-// Windows MOUSEEVENTF flags
+// Windows MOUSEEVENTF flags (for SendInput API)
 const (
 	WinMouseEventFMove       = 0x0001
 	WinMouseEventFLeftDown   = 0x0002
@@ -165,6 +165,15 @@ const (
 	WinMouseEventFMiddleUp   = 0x0040
 	WinMouseEventFWheel      = 0x0800
 	WinMouseEventFAbsolute   = 0x8000
+)
+
+// Windows mouse message flags (wParam) - sent in MouseData.Flags field
+const (
+	WinMouseMKLButton = 0x0001 // Left button is down
+	WinMouseMKRButton = 0x0002 // Right button is down
+	WinMouseMKMButton = 0x0010 // Middle button is down
+	WinMouseMKXButton1 = 0x0020 // X1 button is down
+	WinMouseMKXButton2 = 0x0040 // X2 button is down
 )
 
 // Windows Messages (WM_*) for remote mouse injection

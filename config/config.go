@@ -45,6 +45,7 @@ type Config struct {
 	ListDevices    bool   `json:"-"`
 	ConfigFile     string `json:"-"`
 	ShowVersion    bool   `json:"-"`
+	Demo           bool   `json:"-"`
 }
 
 // defaultConfigPaths returns paths to search for config.json, in priority order.
@@ -291,6 +292,7 @@ func Parse() *Config {
 	)
 	flag.BoolVar(&c.ListDevices, "list-devices", false, "List all /dev/input devices and exit")
 	flag.BoolVar(&c.ShowVersion, "version", false, "Print version and exit")
+	flag.BoolVar(&c.Demo, "demo", false, "Demo mode: test virtual input without MWB connection")
 
 	flag.Parse()
 
@@ -344,7 +346,7 @@ func Parse() *Config {
 
 // Validate checks that required fields are present.
 func (c *Config) Validate() error {
-	if c.ListDevices {
+	if c.ListDevices || c.Demo {
 		return nil
 	}
 
