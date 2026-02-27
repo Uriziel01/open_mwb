@@ -45,7 +45,6 @@ type Config struct {
 	ListDevices    bool   `json:"-"`
 	ConfigFile     string `json:"-"`
 	ShowVersion    bool   `json:"-"`
-	Demo           bool   `json:"-"`
 }
 
 // defaultConfigPaths returns paths to search for config.json, in priority order.
