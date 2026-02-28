@@ -125,6 +125,11 @@ func Marshal(data *GenericData, magicNumber uint32, debug bool) ([]byte, error) 
 		binary.LittleEndian.PutUint32(buf[24:28], data.Handshake.Machine3)
 		binary.LittleEndian.PutUint32(buf[28:32], data.Handshake.Machine4)
 
+	case ClipboardText, ClipboardImage:
+		if data.Raw != nil {
+			copy(buf[16:64], data.Raw)
+		}
+
 	default:
 		binary.LittleEndian.PutUint64(buf[16:24], data.Header.DateTime)
 		if data.Raw != nil {
@@ -132,7 +137,7 @@ func Marshal(data *GenericData, magicNumber uint32, debug bool) ([]byte, error) 
 		}
 	}
 
-	if size == PackageSizeEx && data.MachineName != "" {
+	if size == PackageSizeEx && data.MachineName != "" && data.Header.Type != ClipboardText && data.Header.Type != ClipboardImage {
 		name := []byte(data.MachineName)
 		padded := make([]byte, 32)
 		for i := range padded {
@@ -214,6 +219,12 @@ func Unmarshal(b []byte, magicNumber uint32, debug bool) (*GenericData, error) {
 			}
 		}
 
+	case ClipboardText, ClipboardImage:
+		if len(b) >= 64 {
+			data.Raw = make([]byte, 48)
+			copy(data.Raw, b[16:64])
+		}
+
 	default:
 		data.Header.DateTime = binary.LittleEndian.Uint64(b[16:24])
 		if len(b) > 24 {
@@ -222,7 +233,7 @@ func Unmarshal(b []byte, magicNumber uint32, debug bool) (*GenericData, error) {
 		}
 	}
 
-	if len(b) >= PackageSizeEx {
+	if len(b) >= PackageSizeEx && data.Header.Type != ClipboardText && data.Header.Type != ClipboardImage {
 		nameBytes := b[32:64]
 		end := len(nameBytes)
 		for end > 0 && (nameBytes[end-1] == ' ' || nameBytes[end-1] == 0) {
