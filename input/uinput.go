@@ -226,18 +226,23 @@ func (vi *VirtualInput) InjectMouse(x, y, wheelDelta, flags int32) {
 	absX := int(x) * vi.screenW / 65536
 	absY := int(y) * vi.screenH / 65536
 
+	moved := false
+
 	if vi.absAvailable {
 		writeEvent(vi.mouseFile, EV_ABS, ABS_X, int32(absX))
 		writeEvent(vi.mouseFile, EV_ABS, ABS_Y, int32(absY))
+		moved = true
 	} else {
 		deltaX := absX - vi.absX
 		deltaY := absY - vi.absY
 
 		if deltaX != 0 {
 			writeEvent(vi.mouseFile, EV_REL, REL_X, int32(deltaX))
+			moved = true
 		}
 		if deltaY != 0 {
 			writeEvent(vi.mouseFile, EV_REL, REL_Y, int32(deltaY))
+			moved = true
 		}
 	}
 	vi.absX = absX
@@ -256,7 +261,7 @@ func (vi *VirtualInput) InjectMouse(x, y, wheelDelta, flags int32) {
 		writeEvent(vi.mouseFile, EV_REL, REL_WHEEL, linuxWheel)
 	}
 
-	if changed || wheelDelta != 0 || vi.absAvailable {
+	if changed || wheelDelta != 0 || moved {
 		writeEvent(vi.mouseFile, EV_SYN, SYN_REPORT, 0)
 	}
 }

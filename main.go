@@ -39,6 +39,11 @@ func main() {
 		os.Exit(1)
 	}
 
+	if cfg.Demo {
+		runDemo(cfg)
+		os.Exit(0)
+	}
+
 	log.SetFlags(log.Ltime | log.Lmicroseconds)
 	log.Printf("=== open-mwb v%s ===", Version)
 	log.Printf("Mode: %s | Edge: %s | Screen: %dx%d | MachineID: %d",
@@ -73,10 +78,12 @@ func main() {
 	go clip.Watch()
 	go sendHeartbeats(client, cfg)
 	go receiveLoop(client, vi, clip, cfg.Debug)
+	go emergencyKillSwitch(evdev)
 
 	log.Println("")
 	log.Println("Ready! Move your mouse to the screen edge to switch.")
 	log.Println("Press ScrollLock to return input to this machine.")
+	log.Println("Press PAUSE for emergency kill (releases all devices).")
 	log.Println("Press Ctrl+C to quit.")
 
 	sigCh := make(chan os.Signal, 1)
@@ -223,16 +230,21 @@ func setupInputCapture(cfg *config.Config, client *network.Client) *input.EvdevC
 	evdev.OnKeyEvent = func(code uint16, pressed bool) {
 		vk, ok := input.LinuxToVK[code]
 		if !ok {
+			log.Printf("[KEYBOARD] Linux code %d -> NO MAPPING", code)
 			return
 		}
 
-		flags := input.WM_KEYDOWN
+		flags := int32(0)
+		action := "DOWN"
 		if !pressed {
-			flags = input.WM_KEYUP
+			flags = input.WinKeyEventFKeyUp
+			action = "UP"
 		}
 
+		log.Printf("[KEYBOARD] Linux code %d -> VK 0x%02X (%s)", code, vk, action)
+
 		sendPacket(client, nextID(), cfg.MachineID, client.RemoteMachineID, protocol.Keyboard, sendMu,
-			&protocol.KeyboardData{Vk: vk, Flags: int32(flags)})
+			&protocol.KeyboardData{Vk: vk, Flags: flags})
 	}
 
 	return evdev
@@ -333,10 +345,14 @@ func receiveLoop(client *network.Client, vi *input.VirtualInput, clip *clipboard
 				clip.SetText(text)
 			}
 
-		case protocol.Matrix, protocol.Heartbeat, protocol.Heartbeat_ex, 
-			protocol.Hi, protocol.HideMouse, protocol.MachineSwitched, 
-			protocol.HandshakeAck:
-			// Silently ignore these common packets
+		case protocol.Matrix:
+			log.Printf("[recv] Matrix update")
+
+		default:
+			if debug {
+				log.Printf("[recv] Packet %d (unhandled)", pkt.Header.Type)
+			}
+		}
 	}
 }
 
@@ -372,4 +388,76 @@ func clamp(v, min, max int32) int32 {
 }
 
 func runDemo(cfg *config.Config) {
+	fmt.Println("=== DEMO MODE ===")
+	fmt.Printf("Screen: %dx%d\n", cfg.ScreenWidth, cfg.ScreenHeight)
+
+	vi, err := input.NewVirtualInput(cfg.ScreenWidth, cfg.ScreenHeight)
+	if err != nil {
+		fmt.Printf("Failed: %v\n", err)
+		return
+	}
+	defer vi.Close()
+
+	fmt.Println("Testing cursor movement...")
+	time.Sleep(1 * time.Second)
+
+	centerX, centerY := int32(32768), int32(32768)
+	vi.InjectMouse(centerX, centerY, 0, 0)
+	time.Sleep(500 * time.Millisecond)
+
+	offset := int32(15000)
+	positions := []struct{ x, y int32 }{
+		{centerX - offset, centerY - offset},
+		{centerX + offset, centerY - offset},
+		{centerX + offset, centerY + offset},
+		{centerX - offset, centerY + offset},
+		{centerX, centerY},
+	}
+
+	for _, pos := range positions {
+		vi.InjectMouse(pos.x, pos.y, 0, 0)
+		time.Sleep(300 * time.Millisecond)
+	}
+
+	fmt.Println("Done! Did the cursor move?")
+}
+
+// emergencyKillSwitch monitors for PAUSE key and kills the app immediately
+// This is a safety mechanism to prevent getting locked out
+func emergencyKillSwitch(evdev *input.EvdevCapture) {
+	// Open keyboard device directly for monitoring
+	kbdPath := "/dev/input/event0"
+	if _, err := os.Stat(kbdPath); err != nil {
+		// Try to find keyboard
+		if path, err := input.FindKeyboardDevice(); err == nil {
+			kbdPath = path
+		}
+	}
+
+	f, err := os.Open(kbdPath)
+	if err != nil {
+		log.Printf("[emergency] Cannot open keyboard for monitoring: %v", err)
+		return
+	}
+	defer f.Close()
+
+	buf := make([]byte, 24)
+	for {
+		_, err := f.Read(buf)
+		if err != nil {
+			return
+		}
+
+		// Check for PAUSE key (code 119) press
+		// Input event: [time 16 bytes][type 2 bytes][code 2 bytes][value 4 bytes]
+		code := uint16(buf[18]) | uint16(buf[19])<<8
+		value := int32(buf[20]) | int32(buf[21])<<8 | int32(buf[22])<<16 | int32(buf[23])<<24
+		evType := uint16(buf[16]) | uint16(buf[17])<<8
+
+		if evType == 1 && code == 119 && value == 1 { // EV_KEY, PAUSE, press
+			log.Println("[EMERGENCY] PAUSE key detected - releasing all devices and exiting!")
+			evdev.Close()
+			os.Exit(1)
+		}
+	}
 }

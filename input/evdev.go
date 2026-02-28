@@ -103,7 +103,7 @@ func findDevice(keyword string) (string, error) {
 }
 
 func FindMouseDevice() (string, error) {
-	for _, kw := range []string{"mouse", "pointer", "touchpad", "trackpad"} {
+	for _, kw := range []string{"logitech"} {
 		path, err := findDevice(kw)
 		if err == nil {
 			return path, nil
@@ -113,13 +113,7 @@ func FindMouseDevice() (string, error) {
 }
 
 func FindKeyboardDevice() (string, error) {
-	for _, kw := range []string{"keyboard", "kbd"} {
-		path, err := findDevice(kw)
-		if err == nil {
-			return path, nil
-		}
-	}
-	return "", fmt.Errorf("no keyboard found")
+	return "/dev/input/event4", nil
 }
 
 func ListDevices() {
@@ -163,14 +157,6 @@ func (e *EvdevCapture) Grab() error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
-	// Release all pressed keys before grabbing to avoid sticky keys
-	for code := range e.pressedKeys {
-		if e.OnKeyEvent != nil {
-			e.OnKeyEvent(code, false)
-		}
-		delete(e.pressedKeys, code)
-	}
-
 	if !e.mouseGrabbed {
 		_, _, errno := unix.Syscall(unix.SYS_IOCTL, e.mouseFile.Fd(), EVIOCGRAB, 1)
 		if errno != 0 {
@@ -188,6 +174,16 @@ func (e *EvdevCapture) Grab() error {
 	}
 
 	e.IsRemote = true
+
+	// Release all pressed keys AFTER grabbing and setting remote mode
+	// This ensures KEY UP events are sent to remote, not processed locally
+	for code := range e.pressedKeys {
+		if e.OnKeyEvent != nil {
+			e.OnKeyEvent(code, false)
+		}
+		delete(e.pressedKeys, code)
+	}
+
 	log.Println("[evdev] Grabbed devices - remote mode")
 	return nil
 }
@@ -271,6 +267,16 @@ func (e *EvdevCapture) RunKeyboardLoop() {
 			}
 			e.mu.Unlock()
 
+			// Right Shift + Right Ctrl to enter remote mode (alternative to edge detection)
+			if ev.Code == 54 && ev.Value == 1 { // Right Shift
+				if _, ok := e.pressedKeys[97]; ok { // Right Ctrl (97) is also pressed
+					log.Println("[evdev] Right Shift+Ctrl - entering remote mode")
+					e.Grab()
+					if e.OnEdgeHit != nil {
+						e.OnEdgeHit()
+					}
+				}
+			}
 		}
 	}
 }
@@ -286,35 +292,23 @@ func (e *EvdevCapture) handleLocalMouseEvent(ev InputEvent) {
 			e.cursorY = clamp(e.cursorY, 0, e.screenH-1)
 		}
 
-		// Check for edge hit: 20px from edge AND holding Left Ctrl (keycode 29)
 		edgeHit := false
 		switch e.Edge {
 		case "right":
-			edgeHit = e.cursorX >= e.screenW-20
+			edgeHit = e.cursorX >= e.screenW-1
 		case "left":
-			edgeHit = e.cursorX <= 20
+			edgeHit = e.cursorX <= 0
 		case "top":
-			edgeHit = e.cursorY <= 20
+			edgeHit = e.cursorY <= 0
 		case "bottom":
-			edgeHit = e.cursorY >= e.screenH-20
+			edgeHit = e.cursorY >= e.screenH-1
 		}
 
-		// Only trigger if at edge AND holding Left Ctrl
 		if edgeHit {
-			e.mu.Lock()
-			_, holdingCtrl := e.pressedKeys[29] // Left Ctrl
-			e.mu.Unlock()
-
-			if holdingCtrl {
-				log.Printf("[evdev] Edge %q hit with Ctrl - switching to remote", e.Edge)
-				// Release Ctrl before switching to avoid sticky key
-				if e.OnKeyEvent != nil {
-					e.OnKeyEvent(29, false)
-				}
-				e.Grab()
-				if e.OnEdgeHit != nil {
-					e.OnEdgeHit()
-				}
+			log.Printf("[evdev] Edge %q hit - switching to remote", e.Edge)
+			e.Grab()
+			if e.OnEdgeHit != nil {
+				e.OnEdgeHit()
 			}
 		}
 	}
