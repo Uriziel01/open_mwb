@@ -28,6 +28,7 @@ func (vi *VirtualInput) InjectKeyboard(vk, flags int32) {}
 
 // EvdevCapture stub for Windows
 type EvdevCapture struct {
+	IsRemote          bool
 	OnLocalCursorMove func(x, y int32)
 	OnEdgeHit         func()
 	OnReturn          func()
@@ -41,6 +42,18 @@ func NewEvdevCapture(screenW, screenH int, edge string) *EvdevCapture {
 }
 
 func (e *EvdevCapture) Open(mousePath, kbdPath string) error {
+	return nil
+}
+
+func (e *EvdevCapture) DiscoverAndOpen() error {
+	return nil
+}
+
+func (e *EvdevCapture) Grab() error {
+	return nil
+}
+
+func (e *EvdevCapture) Ungrab() error {
 	return nil
 }
 
@@ -61,6 +74,5 @@ func FindKeyboardDevice() (string, error) {
 	return "dummy-kbd", nil
 }
 
-func ListDevices() error {
-	return nil
+func ListDevices() {
 }

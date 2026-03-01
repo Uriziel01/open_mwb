@@ -160,31 +160,39 @@ func runBackgroundServer(server *network.Server) {
 }
 
 func setupInputCapture(cfg *config.Config, client *network.Client) *input.EvdevCapture {
-	mouseDev := cfg.MouseDevice
-	if mouseDev == "" {
-		var err error
-		mouseDev, err = input.FindMouseDevice()
-		if err != nil {
-			log.Fatalf("Failed to find mouse: %v", err)
-		}
-	}
-
-	kbdDev := cfg.KeyboardDevice
-	if kbdDev == "" {
-		var err error
-		kbdDev, err = input.FindKeyboardDevice()
-		if err != nil {
-			log.Fatalf("Failed to find keyboard: %v", err)
-		}
-	}
-
-	log.Printf("Using mouse: %s", mouseDev)
-	log.Printf("Using keyboard: %s", kbdDev)
-
 	evdev := input.NewEvdevCapture(cfg.ScreenWidth, cfg.ScreenHeight, cfg.Edge)
-	if err := evdev.Open(mouseDev, kbdDev); err != nil {
-		log.Fatalf("Failed to open input devices: %v", err)
+
+	// Use auto-discovery by default (recommended - works with all hardware)
+	if cfg.MouseDevice == "" && cfg.KeyboardDevice == "" {
+		log.Println("Discovering input devices by capability...")
+		if err := evdev.DiscoverAndOpen(); err != nil {
+			log.Fatalf("Failed to discover input devices: %v", err)
+		}
+	} else {
+		// Fallback to specific device paths if configured
+		mouseDev := cfg.MouseDevice
+		if mouseDev == "" {
+			var err error
+			mouseDev, err = input.FindMouseDevice()
+			if err != nil {
+				log.Fatalf("Failed to find mouse: %v", err)
+			}
+		}
+
+		kbdDev := cfg.KeyboardDevice
+		if kbdDev == "" {
+			var err error
+			kbdDev, err = input.FindKeyboardDevice()
+			if err != nil {
+				log.Fatalf("Failed to find keyboard: %v", err)
+			}
+		}
+
+		log.Printf("Using mouse: %s", mouseDev)
+		log.Printf("Using keyboard: %s", kbdDev)
 	}
+
+	log.Printf("Screen: %dx%d, Edge: %s", cfg.ScreenWidth, cfg.ScreenHeight, cfg.Edge)
 
 	var sendMu sync.Mutex
 	packetID := uint32(100)
