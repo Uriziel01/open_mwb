@@ -49,7 +49,7 @@ func (e *EvdevCapture) DiscoverAndOpen() error {
 	return nil
 }
 
-func (e *EvdevCapture) Grab() error {
+func (e *EvdevCapture) Grab(activeMouse interface{}) error {
 	return nil
 }
 

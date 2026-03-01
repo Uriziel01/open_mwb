@@ -152,32 +152,42 @@ func classifyDevice(caps DeviceCapabilities) (isMouse, isKeyboard, isTouchpad bo
 		}
 	}
 
-	// A device is a keyboard if:
-	// 1. It has EV_KEY
-	// 2. It has keys other than just mouse buttons (BTN_0 to BTN_MISC)
-	// 3. Specifically, it should have alphanumeric or function keys
+	// A device is a keyboard if it has EV_KEY and substantial typing keys
+	// Require multiple essential typing keys to filter out multimedia key devices
 	if hasBit(caps.EvBits[:], EV_KEY) {
-		// Count non-button keys
-		nonButtonKeys := 0
-		for i := 0; i < 256; i++ {
+		// Count actual typing keys (letters, numbers, function keys)
+		// Key codes: KEY_1=2 to KEY_0=11 (numbers), KEY_A=30 to KEY_Z=45 (letters)
+		// KEY_F1=59 to KEY_F12=70, KEY_SPACE=57, KEY_ENTER=28
+		typingKeys := 0
+		
+		// Check for letters A-Z (codes 30-45)
+		for i := 30; i <= 45; i++ {
 			if hasBit(caps.KeyBits[:], i) {
-				// Skip mouse/joystick buttons (0x100-0x15f, but we only check first 32 bytes = 256 bits)
-				// Keys 0-255 include standard keyboard keys
-				// Buttons start at BTN_MISC=0x100 which is beyond our 32-byte buffer
-				if i < 256 {
-					nonButtonKeys++
-				}
+				typingKeys++
 			}
 		}
-
-		// If it has many keys, it's likely a keyboard
-		// Also check for specific keyboard keys
-		hasKeyA := hasBit(caps.KeyBits[:], 30)  // KEY_A
-		hasKey1 := hasBit(caps.KeyBits[:], 2)   // KEY_1
-		hasEnter := hasBit(caps.KeyBits[:], 28) // KEY_ENTER
-		hasSpace := hasBit(caps.KeyBits[:], 57) // KEY_SPACE
-
-		if nonButtonKeys > 50 || (hasKeyA && hasKey1) || hasEnter || hasSpace {
+		
+		// Check for numbers 1-0 (codes 2-11)
+		for i := 2; i <= 11; i++ {
+			if hasBit(caps.KeyBits[:], i) {
+				typingKeys++
+			}
+		}
+		
+		// Check for function keys F1-F12 (codes 59-70)
+		for i := 59; i <= 70; i++ {
+			if hasBit(caps.KeyBits[:], i) {
+				typingKeys++
+			}
+		}
+		
+		// Also check for essential keys
+		hasSpace := hasBit(caps.KeyBits[:], 57)
+		hasEnter := hasBit(caps.KeyBits[:], 28)
+		
+		// Must have substantial typing capability
+		// Require at least 15 typing keys (roughly half of A-Z) plus essential keys
+		if typingKeys >= 15 && hasSpace && hasEnter {
 			isKeyboard = true
 		}
 	}
@@ -257,21 +267,23 @@ type DeviceHandle struct {
 }
 
 type EvdevCapture struct {
-	mu            sync.Mutex
-	mouseDevs     []*DeviceHandle
-	kbdDevs       []*DeviceHandle
-	cursorX       int
-	cursorY       int
-	screenW       int
-	screenH       int
-	Edge          string
-	IsRemote      bool
-	OnEdgeHit     func()
-	OnReturn      func()
-	OnMouseEvent  func(dx, dy, wheelDelta int)
-	OnKeyEvent    func(code uint16, pressed bool)
-	OnButtonEvent func(code uint16, pressed bool)
-	pressedKeys   map[uint16]bool
+	mu             sync.Mutex
+	mouseDevs      []*DeviceHandle
+	kbdDevs        []*DeviceHandle
+	activeMouseDev *DeviceHandle // The mouse that triggered edge transition
+	activeKbdDev   *DeviceHandle // The keyboard that was first used in remote mode
+	cursorX        int
+	cursorY        int
+	screenW        int
+	screenH        int
+	Edge           string
+	IsRemote       bool
+	OnEdgeHit      func()
+	OnReturn       func()
+	OnMouseEvent   func(dx, dy, wheelDelta int)
+	OnKeyEvent     func(code uint16, pressed bool)
+	OnButtonEvent  func(code uint16, pressed bool)
+	pressedKeys    map[uint16]bool
 }
 
 func NewEvdevCapture(screenW, screenH int, edge string) *EvdevCapture {
@@ -411,23 +423,23 @@ func ListDevices() {
 	}
 }
 
-func (e *EvdevCapture) Grab() error {
+func (e *EvdevCapture) Grab(activeMouse *DeviceHandle) error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
-	// Grab all mouse devices
-	for _, dev := range e.mouseDevs {
-		if !dev.Grabbed {
-			_, _, errno := unix.Syscall(unix.SYS_IOCTL, dev.File.Fd(), EVIOCGRAB, 1)
-			if errno != 0 {
-				log.Printf("[evdev] Warning: failed to grab mouse %s: %v", dev.Info.Path, errno)
-				continue
-			}
-			dev.Grabbed = true
+	// Only grab the specific mouse that triggered the transition
+	if activeMouse != nil && !activeMouse.Grabbed {
+		_, _, errno := unix.Syscall(unix.SYS_IOCTL, activeMouse.File.Fd(), EVIOCGRAB, 1)
+		if errno != 0 {
+			log.Printf("[evdev] Warning: failed to grab mouse %s: %v", activeMouse.Info.Path, errno)
+		} else {
+			activeMouse.Grabbed = true
+			e.activeMouseDev = activeMouse
+			log.Printf("[evdev] Grabbed mouse: %s", activeMouse.Info.Name)
 		}
 	}
 
-	// Grab all keyboard devices
+	// Grab keyboard for remote typing
 	for _, dev := range e.kbdDevs {
 		if !dev.Grabbed {
 			_, _, errno := unix.Syscall(unix.SYS_IOCTL, dev.File.Fd(), EVIOCGRAB, 1)
@@ -449,7 +461,7 @@ func (e *EvdevCapture) Grab() error {
 		delete(e.pressedKeys, code)
 	}
 
-	log.Println("[evdev] Grabbed all devices - remote mode")
+	log.Println("[evdev] Remote mode active - other mice remain free for local control")
 	return nil
 }
 
@@ -474,6 +486,8 @@ func (e *EvdevCapture) Ungrab() error {
 	}
 
 	e.IsRemote = false
+	e.activeMouseDev = nil
+	e.activeKbdDev = nil
 	e.cursorX = e.screenW / 2
 	e.cursorY = e.screenH / 2
 	log.Println("[evdev] Released all devices - local mode")
@@ -505,12 +519,16 @@ func (e *EvdevCapture) runSingleMouseLoop(dev *DeviceHandle) {
 
 		e.mu.Lock()
 		isRemote := e.IsRemote
+		activeMouse := e.activeMouseDev
 		e.mu.Unlock()
 
 		if isRemote {
-			e.handleRemoteMouseEvent(ev)
+			// In remote mode, only process events from the active mouse
+			if dev == activeMouse {
+				e.handleRemoteMouseEvent(ev)
+			}
 		} else {
-			e.handleLocalMouseEvent(ev)
+			e.handleLocalMouseEvent(ev, dev)
 		}
 	}
 }
@@ -546,10 +564,26 @@ func (e *EvdevCapture) runSingleKeyboardLoop(dev *DeviceHandle) {
 
 		e.mu.Lock()
 		isRemote := e.IsRemote
+		activeKbd := e.activeKbdDev
 		e.mu.Unlock()
 
 		if isRemote {
-			// ScrollLock to return to local mode
+			// In remote mode, only accept events from the active keyboard
+			// If no active keyboard is set, make this one active
+			if activeKbd == nil && pressed {
+				e.mu.Lock()
+				e.activeKbdDev = dev
+				activeKbd = dev
+				e.mu.Unlock()
+				log.Printf("[evdev] Active keyboard set: %s", dev.Info.Name)
+			}
+
+			// Only process if this is the active keyboard
+			if dev != activeKbd {
+				continue
+			}
+
+			// ScrollLock to return to local mode (works from active keyboard)
 			if ev.Code == 70 && ev.Value == 1 {
 				log.Println("[evdev] ScrollLock - returning to local")
 				e.Ungrab()
@@ -563,7 +597,7 @@ func (e *EvdevCapture) runSingleKeyboardLoop(dev *DeviceHandle) {
 				e.OnKeyEvent(ev.Code, pressed)
 			}
 		} else {
-			// Track pressed keys in local mode
+			// Track pressed keys in local mode (any keyboard)
 			e.mu.Lock()
 			if pressed {
 				e.pressedKeys[ev.Code] = true
@@ -576,10 +610,15 @@ func (e *EvdevCapture) runSingleKeyboardLoop(dev *DeviceHandle) {
 			if ev.Code == 54 && ev.Value == 1 { // Right Shift
 				e.mu.Lock()
 				_, hasRightCtrl := e.pressedKeys[97] // Right Ctrl (97)
+				// Get first mouse for keyboard-triggered transition
+				var firstMouse *DeviceHandle
+				if len(e.mouseDevs) > 0 {
+					firstMouse = e.mouseDevs[0]
+				}
 				e.mu.Unlock()
-				if hasRightCtrl {
+				if hasRightCtrl && firstMouse != nil {
 					log.Println("[evdev] Right Shift+Ctrl - entering remote mode")
-					e.Grab()
+					e.Grab(firstMouse)
 					if e.OnEdgeHit != nil {
 						e.OnEdgeHit()
 					}
@@ -589,23 +628,18 @@ func (e *EvdevCapture) runSingleKeyboardLoop(dev *DeviceHandle) {
 	}
 }
 
-func (e *EvdevCapture) handleLocalMouseEvent(ev InputEvent) {
+func (e *EvdevCapture) handleLocalMouseEvent(ev InputEvent, dev *DeviceHandle) {
 	if ev.Type == EV_REL {
+		e.mu.Lock()
 		switch ev.Code {
 		case REL_X:
-			e.mu.Lock()
 			e.cursorX += int(ev.Value)
 			e.cursorX = clamp(e.cursorX, 0, e.screenW-1)
-			e.mu.Unlock()
 		case REL_Y:
-			e.mu.Lock()
 			e.cursorY += int(ev.Value)
 			e.cursorY = clamp(e.cursorY, 0, e.screenH-1)
-			e.mu.Unlock()
 		}
 
-		// Check edge hit with mutex
-		e.mu.Lock()
 		cursorX := e.cursorX
 		cursorY := e.cursorY
 		screenW := e.screenW
@@ -626,8 +660,8 @@ func (e *EvdevCapture) handleLocalMouseEvent(ev InputEvent) {
 		}
 
 		if edgeHit {
-			log.Printf("[evdev] Edge %q hit - switching to remote", edge)
-			e.Grab()
+			log.Printf("[evdev] Edge %q hit on %s - switching to remote", edge, dev.Info.Name)
+			e.Grab(dev)
 			if e.OnEdgeHit != nil {
 				e.OnEdgeHit()
 			}

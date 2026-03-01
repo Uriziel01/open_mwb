@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"compress/flate"
+	"context"
 	"fmt"
 	"io"
 	"log"
@@ -53,26 +54,71 @@ func main() {
 	log.Printf("Mode: %s | Edge: %s | Screen: %dx%d | MachineID: %d",
 		cfg.Mode, cfg.Edge, cfg.ScreenWidth, cfg.ScreenHeight, cfg.MachineID)
 
-	client, err := connectClient(cfg)
-	if err != nil {
-		log.Fatalf("Connection failed: %v", err)
-	}
-
 	if cfg.Mode == "tui" {
+		// TUI mode doesn't support reconnection - run once
+		client, err := connectClient(cfg)
+		if err != nil {
+			log.Fatalf("Connection failed: %v", err)
+		}
 		screen := tui.New(cfg.Edge, client, cfg.MachineID, client.RemoteMachineID, cfg.Debug)
 		screen.Run()
 		client.Conn.Close()
 		return
 	}
 
+	// Main reconnection loop
+	for {
+		client, err := connectClient(cfg)
+		if err != nil {
+			log.Printf("Connection failed: %v", err)
+			log.Printf("Retrying in 5 seconds...")
+			time.Sleep(5 * time.Second)
+			continue
+		}
+
+		// Create cancellation context for this connection
+		ctx, cancel := context.WithCancel(context.Background())
+		
+		// Run the main session
+		disconnectCh := runSession(ctx, cfg, client)
+
+		// Wait for either disconnection or interrupt signal
+		sigCh := make(chan os.Signal, 1)
+		signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+		
+		select {
+		case <-sigCh:
+			// User interrupted - clean shutdown
+			log.Println("Shutting down...")
+			cancel()
+			// Give goroutines time to stop before closing connection
+			time.Sleep(100 * time.Millisecond)
+			client.Conn.Close()
+			return
+		case <-disconnectCh:
+			// Connection lost - reconnect
+			log.Printf("Connection lost, reconnecting in 5 seconds...")
+			cancel()
+			// Give goroutines time to stop before closing connection
+			time.Sleep(100 * time.Millisecond)
+			client.Conn.Close()
+			time.Sleep(5 * time.Second)
+			continue
+		}
+	}
+}
+
+// runSession starts all goroutines for a connected session and returns a channel 
+// that signals when the connection is lost
+func runSession(ctx context.Context, cfg *config.Config, client *network.Client) <-chan struct{} {
+	disconnectCh := make(chan struct{})
+
 	vi, err := input.NewVirtualInput(cfg.ScreenWidth, cfg.ScreenHeight)
 	if err != nil {
 		log.Fatalf("Failed to create virtual input: %v", err)
 	}
-	defer vi.Close()
 
 	evdev := setupInputCapture(cfg, client)
-	defer evdev.Close()
 
 	clip := clipboard.New()
 	setupClipboard(clip, client, cfg)
@@ -80,9 +126,9 @@ func main() {
 	go evdev.RunMouseLoop()
 	go evdev.RunKeyboardLoop()
 	go clip.Watch()
-	go sendHeartbeats(client, cfg)
-	go receiveLoop(client, vi, clip, evdev, cfg.Debug)
-	go emergencyKillSwitch(evdev)
+	go sendHeartbeats(ctx, client, cfg)
+	go receiveLoop(ctx, client, vi, clip, evdev, cfg.Debug, disconnectCh)
+	go emergencyKillSwitch(ctx, evdev)
 
 	log.Println("")
 	log.Println("Ready! Move your mouse to the screen edge to switch.")
@@ -90,12 +136,19 @@ func main() {
 	log.Println("Press F1 for emergency kill (releases all devices).")
 	log.Println("Press Ctrl+C to quit.")
 
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
-	<-sigCh
+	// Wait for disconnection or context cancellation, then cleanup
+	go func() {
+		select {
+		case <-ctx.Done():
+		case <-disconnectCh:
+		}
+		// Cleanup
+		evdev.Close()
+		clip.Stop()
+		vi.Close()
+	}()
 
-	log.Println("Shutting down...")
-	clip.Stop()
+	return disconnectCh
 }
 
 func connectClient(cfg *config.Config) (*network.Client, error) {
@@ -325,6 +378,10 @@ func setupClipboard(clip *clipboard.Clipboard, client *network.Client, cfg *conf
 }
 
 func sendPacket(client *network.Client, id, src, dst uint32, pktType protocol.PackageType, mu sync.Mutex, payload interface{}) {
+	if !client.IsConnected() {
+		return
+	}
+
 	pkt := &protocol.GenericData{
 		Header: protocol.Header{
 			Type:     pktType,
@@ -348,11 +405,14 @@ func sendPacket(client *network.Client, id, src, dst uint32, pktType protocol.Pa
 	err := client.Send(pkt)
 	mu.Unlock()
 	if err != nil {
-		log.Printf("[send] Failed to send %v: %v", pktType, err)
+		// Only log errors if we're still connected (not during intentional shutdown)
+		if client.IsConnected() {
+			log.Printf("[send] Failed to send %v: %v", pktType, err)
+		}
 	}
 }
 
-func sendHeartbeats(client *network.Client, cfg *config.Config) {
+func sendHeartbeats(ctx context.Context, client *network.Client, cfg *config.Config) {
 	var sendMu sync.Mutex
 	packetID := uint32(100)
 
@@ -370,18 +430,35 @@ func sendHeartbeats(client *network.Client, cfg *config.Config) {
 
 	ticker := time.NewTicker(2 * time.Second)
 	defer ticker.Stop()
-	for range ticker.C {
-		sendPacket(client, nextID(), cfg.MachineID, client.RemoteMachineID, protocol.Heartbeat, sendMu, nil)
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			sendPacket(client, nextID(), cfg.MachineID, client.RemoteMachineID, protocol.Heartbeat, sendMu, nil)
+		}
 	}
 }
 
-func receiveLoop(client *network.Client, vi *input.VirtualInput, clip *clipboard.Clipboard, evdev *input.EvdevCapture, debug bool) {
+func receiveLoop(ctx context.Context, client *network.Client, vi *input.VirtualInput, clip *clipboard.Clipboard, evdev *input.EvdevCapture, debug bool, disconnectCh chan<- struct{}) {
 	var clipboardBuffer []byte
 	var receivingClipboard bool
 
 	for {
+		// Check for context cancellation
+		select {
+		case <-ctx.Done():
+			return
+		default:
+		}
+
 		pkt, err := client.Receive()
 		if err != nil {
+			if err == io.EOF {
+				log.Printf("[recv] Connection closed by remote (EOF)")
+				close(disconnectCh)
+				return
+			}
 			log.Printf("[recv] Error: %v", err)
 			continue
 		}
@@ -552,7 +629,7 @@ func runDemo(cfg *config.Config) {
 // emergencyKillSwitch monitors for F1 key and kills the app immediately
 // This is a safety mechanism to prevent getting locked out
 // F1 is KEY_F1 = 59 in Linux input event codes
-func emergencyKillSwitch(evdev *input.EvdevCapture) {
+func emergencyKillSwitch(ctx context.Context, evdev *input.EvdevCapture) {
 	// Open keyboard device directly for monitoring
 	kbdPath := "/dev/input/event7"
 	if _, err := os.Stat(kbdPath); err != nil {
@@ -571,6 +648,12 @@ func emergencyKillSwitch(evdev *input.EvdevCapture) {
 
 	buf := make([]byte, 24)
 	for {
+		select {
+		case <-ctx.Done():
+			return
+		default:
+		}
+
 		_, err := f.Read(buf)
 		if err != nil {
 			return

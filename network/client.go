@@ -7,6 +7,7 @@ import (
 	"io"
 	"log"
 	"net"
+	"sync/atomic"
 	"time"
 
 	"open-mwb/crypto"
@@ -21,6 +22,15 @@ type Client struct {
 	RemoteMachineID uint32
 	Debug           bool
 	MachineName     string
+	connected       atomic.Bool
+}
+
+func (c *Client) IsConnected() bool {
+	return c.connected.Load()
+}
+
+func (c *Client) markDisconnected() {
+	c.connected.Store(false)
 }
 
 func Connect(address string, port int, securityKey string, machineID uint32, machineName string, debug bool) (*Client, error) {
@@ -48,6 +58,7 @@ func Connect(address string, port int, securityKey string, machineID uint32, mac
 		Debug:       debug,
 		MachineName: machineName,
 	}
+	// Note: connected flag is set after successful handshake
 
 	if err := c.Cipher.SendRandomBlock(conn); err != nil {
 		conn.Close()
@@ -164,6 +175,7 @@ func (c *Client) handshake() error {
 	}
 
 	c.Conn.SetReadDeadline(time.Time{})
+	c.connected.Store(true)
 	log.Printf("[handshake] Complete - both sides trusted")
 	return nil
 }
@@ -211,7 +223,11 @@ func (c *Client) Send(data *protocol.GenericData) error {
 
 	encrypted := c.Cipher.Encrypt(plainBytes)
 	_, err = c.Conn.Write(encrypted)
-	return err
+	if err != nil {
+		c.markDisconnected()
+		return err
+	}
+	return nil
 }
 
 func (c *Client) Receive() (*protocol.GenericData, error) {

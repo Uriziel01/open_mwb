@@ -382,6 +382,12 @@ func (s *Screen) receiveLoop() {
 		pkt, err := s.Client.Receive()
 		if err != nil {
 			s.mu.Lock()
+			if err == io.EOF {
+				s.Status = "Connection closed by remote (EOF)"
+				s.mu.Unlock()
+				s.render()
+				return
+			}
 			s.Status = fmt.Sprintf("Recv error: %v", err)
 			s.mu.Unlock()
 			s.render()
