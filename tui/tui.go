@@ -1,7 +1,10 @@
 package tui
 
 import (
+	"bytes"
+	"compress/flate"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"strings"
@@ -13,6 +16,7 @@ import (
 	"open-mwb/input"
 	"open-mwb/network"
 	"open-mwb/protocol"
+	"open-mwb/util"
 )
 
 // Screen represents the virtual terminal screen for debugging.
@@ -48,13 +52,34 @@ type Screen struct {
 }
 
 // New creates a new TUI debug screen.
-func New(width, height int, edge string, client *network.Client, machineID, remoteMachineID uint32, debug bool) *Screen {
+func New(edge string, client *network.Client, machineID, remoteMachineID uint32, debug bool) *Screen {
 	_ = debug // reserved for future use
+
+	// Get actual terminal size
+	width, height, err := term.GetSize(int(os.Stdout.Fd()))
+	if err != nil {
+		// Fallback to reasonable defaults
+		width, height = 80, 24
+	}
+
+	// Account for UI elements around the content area:
+	// Title (1) + Top border (1) + Content (Height) + Bottom border (1) + Status lines (2) = Height + 5
+	// Leave extra room for terminal chrome/prompt
+	contentWidth := width - 4    // Left border (2 chars) + right border (2 chars)
+	contentHeight := height - 20 // Title + borders + status + padding + terminal chrome
+
+	if contentWidth < 18 {
+		contentWidth = 18
+	}
+	if contentHeight < 8 {
+		contentHeight = 8
+	}
+
 	return &Screen{
-		Width:           width,
-		Height:          height,
-		CursorX:         width / 2,
-		CursorY:         height / 2,
+		Width:           contentWidth,
+		Height:          contentHeight,
+		CursorX:         contentWidth / 2,
+		CursorY:         contentHeight / 2,
 		Edge:            edge,
 		Client:          client,
 		MachineID:       machineID,
@@ -139,19 +164,42 @@ func (s *Screen) Run() {
 		// 'c' to copy timestamp to target PC clipboard
 		if (buf[0] == 'c' || buf[0] == 'C') && s.IsRemote {
 			s.mu.Lock()
+			formatted := formatClipboardText(time.Now().Format(time.RFC3339))
+			
+			// Send clipboard data in chunks (48 bytes per packet for ClipboardText)
+			chunkSize := 48
+			for i := 0; i < len(formatted); i += chunkSize {
+				end := i + chunkSize
+				if end > len(formatted) {
+					end = len(formatted)
+				}
+				chunk := formatted[i:end]
+				s.PacketID++
+				pkt := &protocol.GenericData{
+					Header: protocol.Header{
+						Type:     protocol.ClipboardText,
+						Id:       s.PacketID,
+						Src:      s.MachineID,
+						Des:      s.RemoteMachineID,
+						DateTime: uint64(time.Now().UnixNano() / 10000),
+					},
+					Raw: chunk,
+				}
+				s.Client.Send(pkt)
+			}
+			
+			// Always send ClipboardDataEnd to signal end of transfer
 			s.PacketID++
-			ts := time.Now().Format(time.RFC3339)
-			pkt := &protocol.GenericData{
+			endPkt := &protocol.GenericData{
 				Header: protocol.Header{
-					Type:     protocol.ClipboardText,
+					Type:     protocol.ClipboardDataEnd,
 					Id:       s.PacketID,
 					Src:      s.MachineID,
 					Des:      s.RemoteMachineID,
 					DateTime: uint64(time.Now().UnixNano() / 10000),
 				},
-				Raw: []byte(ts),
 			}
-			if err := s.Client.Send(pkt); err != nil {
+			if err := s.Client.Send(endPkt); err != nil {
 				s.Status = "Send error: " + err.Error()
 			} else {
 				s.Status = "REMOTE - sent clipboard timestamp"
@@ -240,8 +288,8 @@ func (s *Screen) render() {
 func (s *Screen) renderLocked() {
 	var b strings.Builder
 
-	// Move to top-left
-	b.WriteString("\033[H")
+	// Clear screen and move to top-left to prevent old frame artifacts
+	b.WriteString("\033[2J\033[H")
 
 	// Title
 	modeColor := "\033[32m" // green = local
@@ -327,6 +375,9 @@ func (s *Screen) sendMousePacket(x, y, wheelDelta, flags int) {
 }
 
 func (s *Screen) receiveLoop() {
+	var clipboardBuffer []byte
+	var receivingClipboard bool
+
 	for {
 		pkt, err := s.Client.Receive()
 		if err != nil {
@@ -369,11 +420,20 @@ func (s *Screen) receiveLoop() {
 
 		case protocol.ClipboardText:
 			if pkt.Raw != nil {
-				text := string(pkt.Raw)
+				clipboardBuffer = append(clipboardBuffer, pkt.Raw...)
+				receivingClipboard = true
+				s.Status = fmt.Sprintf("Recv clipboard chunk: %d bytes (total: %d)", len(pkt.Raw), len(clipboardBuffer))
+			}
+
+		case protocol.ClipboardDataEnd:
+			if receivingClipboard && len(clipboardBuffer) > 0 {
+				text := decompressAndParseClipboard(clipboardBuffer)
 				if len(text) > 40 {
 					text = text[:40] + "..."
 				}
 				s.Status = fmt.Sprintf("Recv clipboard: %q", text)
+				clipboardBuffer = nil
+				receivingClipboard = false
 			}
 
 		default:
@@ -402,6 +462,85 @@ func (s *Screen) heartbeatLoop() {
 		s.Client.Send(pkt)
 		s.mu.Unlock()
 	}
+}
+
+// decompressAndParseClipboard decompresses and decodes clipboard data from Windows
+// Windows MWB sends clipboard data as: UTF-16 LE text, optionally compressed with flate
+// Format: "TXT<payload>{GUID}"
+func decompressAndParseClipboard(data []byte) string {
+	if len(data) == 0 {
+		return ""
+	}
+
+	// Try to decompress first (Windows MWB compresses larger text)
+	var decompressed []byte
+	if len(data) > 10 {
+		r := flate.NewReader(bytes.NewReader(data))
+		var err error
+		decompressed, err = io.ReadAll(r)
+		r.Close()
+		if err != nil {
+			// Not compressed, use raw data
+			decompressed = data
+		}
+	} else {
+		decompressed = data
+	}
+
+	// Decode UTF-16 LE to UTF-8
+	var text string
+	if len(decompressed) >= 2 && decompressed[1] == 0 {
+		// Likely UTF-16 LE (alternate bytes are 0 for ASCII)
+		runes := make([]rune, 0, len(decompressed)/2)
+		for i := 0; i < len(decompressed)-1; i += 2 {
+			r := uint16(decompressed[i]) | (uint16(decompressed[i+1]) << 8)
+			if r != 0 {
+				runes = append(runes, rune(r))
+			}
+		}
+		text = string(runes)
+	} else {
+		// Already UTF-8
+		text = string(decompressed)
+	}
+
+	// Parse the MWB format: remove "TXT" prefix and "{GUID}" suffix
+	payload, err := util.ParseMWBClipboardFormat(text)
+	if err != nil {
+		// If parsing fails, return the raw text (might be a different format)
+		return text
+	}
+
+	return payload
+}
+
+// formatClipboardText formats text for Windows MWB compatibility
+// Format: "TXT<payload>{GUID}"
+// Encoded as UTF-16 LE
+// Note: Only compress if data exceeds 48 bytes (packet limit), otherwise send raw UTF-16
+func formatClipboardText(text string) []byte {
+	// Use the helper function to generate the MWB-formatted clipboard string
+	formatted := util.GenerateMWBClipboardFormat(text)
+
+	// Encode as UTF-16 LE
+	utf16Bytes := make([]byte, len(formatted)*2)
+	for i, r := range formatted {
+		utf16Bytes[i*2] = byte(r)
+		utf16Bytes[i*2+1] = byte(r >> 8)
+	}
+
+	// Only compress if it exceeds packet limit (48 bytes for clipboard data)
+	// For small text, compression adds overhead and may exceed the limit
+	if len(utf16Bytes) > 48 {
+		var buf bytes.Buffer
+		w, _ := flate.NewWriter(&buf, flate.DefaultCompression)
+		w.Write(utf16Bytes)
+		w.Close()
+		return buf.Bytes()
+	}
+
+	// Return raw UTF-16 for small text
+	return utf16Bytes
 }
 
 func (s *Screen) enableRawMode() {

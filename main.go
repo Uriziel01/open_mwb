@@ -1,7 +1,10 @@
 package main
 
 import (
+	"bytes"
+	"compress/flate"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"os/signal"
@@ -15,6 +18,7 @@ import (
 	"open-mwb/network"
 	"open-mwb/protocol"
 	"open-mwb/tui"
+	"open-mwb/util"
 )
 
 const Version = "0.1.0"
@@ -55,7 +59,7 @@ func main() {
 	}
 
 	if cfg.Mode == "tui" {
-		screen := tui.New(60, 20, cfg.Edge, client, cfg.MachineID, client.RemoteMachineID, cfg.Debug)
+		screen := tui.New(cfg.Edge, client, cfg.MachineID, client.RemoteMachineID, cfg.Debug)
 		screen.Run()
 		client.Conn.Close()
 		return
@@ -77,13 +81,13 @@ func main() {
 	go evdev.RunKeyboardLoop()
 	go clip.Watch()
 	go sendHeartbeats(client, cfg)
-	go receiveLoop(client, vi, clip, cfg.Debug)
+	go receiveLoop(client, vi, clip, evdev, cfg.Debug)
 	go emergencyKillSwitch(evdev)
 
 	log.Println("")
 	log.Println("Ready! Move your mouse to the screen edge to switch.")
 	log.Println("Press ScrollLock to return input to this machine.")
-	log.Println("Press PAUSE for emergency kill (releases all devices).")
+	log.Println("Press F1 for emergency kill (releases all devices).")
 	log.Println("Press Ctrl+C to quit.")
 
 	sigCh := make(chan os.Signal, 1)
@@ -250,6 +254,35 @@ func setupInputCapture(cfg *config.Config, client *network.Client) *input.EvdevC
 	return evdev
 }
 
+// formatClipboardText formats text for Windows MWB compatibility
+// Format: "TXT<payload>{GUID}"
+// Encoded as UTF-16 LE
+// Note: Only compress if data exceeds 48 bytes (packet limit), otherwise send raw UTF-16
+func formatClipboardText(text string) []byte {
+	// Use the helper function to generate the MWB-formatted clipboard string
+	formatted := util.GenerateMWBClipboardFormat(text)
+
+	// Encode as UTF-16 LE
+	utf16Bytes := make([]byte, len(formatted)*2)
+	for i, r := range formatted {
+		utf16Bytes[i*2] = byte(r)
+		utf16Bytes[i*2+1] = byte(r >> 8)
+	}
+
+	// Only compress if it exceeds packet limit (48 bytes for clipboard data)
+	// For small text, compression adds overhead and may exceed the limit
+	if len(utf16Bytes) > 48 {
+		var buf bytes.Buffer
+		w, _ := flate.NewWriter(&buf, flate.DefaultCompression)
+		w.Write(utf16Bytes)
+		w.Close()
+		return buf.Bytes()
+	}
+
+	// Return raw UTF-16 for small text
+	return utf16Bytes
+}
+
 func setupClipboard(clip *clipboard.Clipboard, client *network.Client, cfg *config.Config) {
 	var sendMu sync.Mutex
 	packetID := uint32(100)
@@ -262,9 +295,24 @@ func setupClipboard(clip *clipboard.Clipboard, client *network.Client, cfg *conf
 	}
 
 	clip.OnChange = func(content string) {
-		log.Printf("[clipboard] Sending %d chars", len(content))
-		sendPacket(client, nextID(), cfg.MachineID, client.RemoteMachineID, protocol.ClipboardText, sendMu,
-			[]byte(content))
+		formatted := formatClipboardText(content)
+		log.Printf("[clipboard] Sending %d chars (formatted: %d bytes)", len(content), len(formatted))
+		log.Printf("[clipboard] Data preview: %q", content[:min(len(content), 50)])
+
+		// Send clipboard data in chunks (48 bytes per packet for ClipboardText)
+		chunkSize := 48
+		for i := 0; i < len(formatted); i += chunkSize {
+			end := i + chunkSize
+			if end > len(formatted) {
+				end = len(formatted)
+			}
+			chunk := formatted[i:end]
+			sendPacket(client, nextID(), cfg.MachineID, client.RemoteMachineID, protocol.ClipboardText, sendMu, chunk)
+		}
+
+		// Always send ClipboardDataEnd to signal end of transfer
+		sendPacket(client, nextID(), cfg.MachineID, client.RemoteMachineID, protocol.ClipboardDataEnd, sendMu, nil)
+		log.Printf("[clipboard] Sent ClipboardDataEnd marker")
 	}
 }
 
@@ -319,7 +367,10 @@ func sendHeartbeats(client *network.Client, cfg *config.Config) {
 	}
 }
 
-func receiveLoop(client *network.Client, vi *input.VirtualInput, clip *clipboard.Clipboard, debug bool) {
+func receiveLoop(client *network.Client, vi *input.VirtualInput, clip *clipboard.Clipboard, evdev *input.EvdevCapture, debug bool) {
+	var clipboardBuffer []byte
+	var receivingClipboard bool
+
 	for {
 		pkt, err := client.Receive()
 		if err != nil {
@@ -340,13 +391,31 @@ func receiveLoop(client *network.Client, vi *input.VirtualInput, clip *clipboard
 
 		case protocol.ClipboardText:
 			if pkt.Raw != nil {
-				text := string(pkt.Raw)
-				log.Printf("[recv] Clipboard: %d chars", len(text))
-				clip.SetText(text)
+				clipboardBuffer = append(clipboardBuffer, pkt.Raw...)
+				receivingClipboard = true
+				if debug {
+					log.Printf("[recv] Clipboard chunk: %d bytes (total: %d)", len(pkt.Raw), len(clipboardBuffer))
+				}
+			}
+
+		case protocol.ClipboardDataEnd:
+			if receivingClipboard && len(clipboardBuffer) > 0 {
+				text := decompressAndParseClipboard(clipboardBuffer)
+				if text != "" {
+					log.Printf("[recv] Clipboard: %d chars", len(text))
+					clip.SetText(text)
+				}
+				clipboardBuffer = nil
+				receivingClipboard = false
 			}
 
 		case protocol.Matrix:
 			log.Printf("[recv] Matrix update")
+
+		case protocol.MachineSwitched:
+			// Windows MWB sends this when mouse hits the edge coming back to us
+			log.Printf("[recv] MachineSwitched from %d - returning to local mode", pkt.Header.Src)
+			evdev.Ungrab()
 
 		default:
 			if debug {
@@ -354,6 +423,56 @@ func receiveLoop(client *network.Client, vi *input.VirtualInput, clip *clipboard
 			}
 		}
 	}
+}
+
+// decompressAndParseClipboard decompresses and decodes clipboard data from Windows
+// Windows MWB sends clipboard data as: UTF-16 LE text, optionally compressed with flate
+// Format: "TXT<payload>{GUID}"
+func decompressAndParseClipboard(data []byte) string {
+	if len(data) == 0 {
+		return ""
+	}
+
+	// Try to decompress first (Windows MWB compresses larger text)
+	var decompressed []byte
+	if len(data) > 10 {
+		r := flate.NewReader(bytes.NewReader(data))
+		var err error
+		decompressed, err = io.ReadAll(r)
+		r.Close()
+		if err != nil {
+			// Not compressed, use raw data
+			decompressed = data
+		}
+	} else {
+		decompressed = data
+	}
+
+	// Decode UTF-16 LE to UTF-8
+	var text string
+	if len(decompressed) >= 2 && decompressed[1] == 0 {
+		// Likely UTF-16 LE (alternate bytes are 0 for ASCII)
+		runes := make([]rune, 0, len(decompressed)/2)
+		for i := 0; i < len(decompressed)-1; i += 2 {
+			r := uint16(decompressed[i]) | (uint16(decompressed[i+1]) << 8)
+			if r != 0 {
+				runes = append(runes, rune(r))
+			}
+		}
+		text = string(runes)
+	} else {
+		// Already UTF-8
+		text = string(decompressed)
+	}
+
+	// Parse the MWB format: remove "TXT" prefix and "{GUID}" suffix
+	payload, err := util.ParseMWBClipboardFormat(text)
+	if err != nil {
+		// If parsing fails, return the raw text (might be a different format)
+		return text
+	}
+
+	return payload
 }
 
 func buttonFlags(code uint16, pressed bool) int32 {
@@ -422,11 +541,12 @@ func runDemo(cfg *config.Config) {
 	fmt.Println("Done! Did the cursor move?")
 }
 
-// emergencyKillSwitch monitors for PAUSE key and kills the app immediately
+// emergencyKillSwitch monitors for F1 key and kills the app immediately
 // This is a safety mechanism to prevent getting locked out
+// F1 is KEY_F1 = 59 in Linux input event codes
 func emergencyKillSwitch(evdev *input.EvdevCapture) {
 	// Open keyboard device directly for monitoring
-	kbdPath := "/dev/input/event0"
+	kbdPath := "/dev/input/event7"
 	if _, err := os.Stat(kbdPath); err != nil {
 		// Try to find keyboard
 		if path, err := input.FindKeyboardDevice(); err == nil {
@@ -448,14 +568,14 @@ func emergencyKillSwitch(evdev *input.EvdevCapture) {
 			return
 		}
 
-		// Check for PAUSE key (code 119) press
+		// Check for F1 key (code 59) press
 		// Input event: [time 16 bytes][type 2 bytes][code 2 bytes][value 4 bytes]
 		code := uint16(buf[18]) | uint16(buf[19])<<8
 		value := int32(buf[20]) | int32(buf[21])<<8 | int32(buf[22])<<16 | int32(buf[23])<<24
 		evType := uint16(buf[16]) | uint16(buf[17])<<8
-
-		if evType == 1 && code == 119 && value == 1 { // EV_KEY, PAUSE, press
-			log.Println("[EMERGENCY] PAUSE key detected - releasing all devices and exiting!")
+		log.Printf("[emergency] Event type %d, code %d, value %d", evType, code, value)
+		if evType == 1 && code == 59 && value == 1 { // EV_KEY, F1, press
+			log.Println("[EMERGENCY] F1 key detected - releasing all devices and exiting!")
 			evdev.Close()
 			os.Exit(1)
 		}

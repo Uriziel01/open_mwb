@@ -113,7 +113,7 @@ func FindMouseDevice() (string, error) {
 }
 
 func FindKeyboardDevice() (string, error) {
-	return "/dev/input/event4", nil
+	return "/dev/input/event7", nil
 }
 
 func ListDevices() {

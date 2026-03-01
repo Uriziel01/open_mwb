@@ -185,10 +185,16 @@ func TestIntegration_MatrixEdge_Transition(t *testing.T) {
 
 	if !foundHideMouse {
 		t.Fatal("Did not receive transition packets (HideMouse) after slamming edge")
-	} else if foundMouseMoves == 0 {
+	}
+	if !foundNextMachine {
+		t.Fatal("Did not receive NextMachine packet after slamming edge")
+	}
+	if foundMouseMoves == 0 {
 		t.Fatal("Received HideMouse, but no subsequent Mouse control packets were routed to Linux")
 	}
 }
+
+func TestIntegration_WindowsToLinux_ClipboardText(t *testing.T) {
 	vmIP := os.Getenv("TEST_VM_IP")
 	if vmIP == "" {
 		t.Skip("Skipping live VM integration test. Set TEST_VM_IP to run.")
