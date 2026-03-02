@@ -90,7 +90,7 @@ Create a `config.json` next to the binary (or in the working directory):
 
 ```bash
 # Run as root (required for /dev/uinput and raw input device access)
-sudo ./open-mwb
+sudo -E ./open-mwb --mode client
 ```
 
 ---

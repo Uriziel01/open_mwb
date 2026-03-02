@@ -33,6 +33,18 @@ func (m *MockInput) InjectKeyboard(vk int32, flags int32) {
 	m.KeyEvents = append(m.KeyEvents, KeyEvent{VK: vk, Flags: flags})
 }
 
+func (m *MockInput) ReleaseAllKeys() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	// Release all keys that were pressed (flags == 0 means key down, so send key up)
+	for _, ev := range m.KeyEvents {
+		if ev.Flags == 0 {
+			// This key was pressed down, release it
+			m.KeyEvents = append(m.KeyEvents, KeyEvent{VK: ev.VK, Flags: 0x0080}) // LLKHF_UP
+		}
+	}
+}
+
 func (m *MockInput) Close() {
 	m.mu.Lock()
 	defer m.mu.Unlock()

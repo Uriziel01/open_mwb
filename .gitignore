@@ -1,7 +1,7 @@
 pkg/
 
 # Local config (contains security key)
-config.json
+config*.json
 
 # Reference source (Windows MWB, not our code)
 old_mwb/

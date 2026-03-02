@@ -51,8 +51,8 @@ func main() {
 
 	log.SetFlags(log.Ltime | log.Lmicroseconds)
 	log.Printf("=== open-mwb v%s ===", Version)
-	log.Printf("Mode: %s | Edge: %s | Screen: %dx%d | MachineID: %d",
-		cfg.Mode, cfg.Edge, cfg.ScreenWidth, cfg.ScreenHeight, cfg.MachineID)
+	log.Printf("Mode: %s | Screen: %dx%d | MachineID: %d",
+		cfg.Mode, cfg.ScreenWidth, cfg.ScreenHeight, cfg.MachineID)
 
 	if cfg.Mode == "tui" {
 		// TUI mode doesn't support reconnection - run once
@@ -60,7 +60,7 @@ func main() {
 		if err != nil {
 			log.Fatalf("Connection failed: %v", err)
 		}
-		screen := tui.New(cfg.Edge, client, cfg.MachineID, client.RemoteMachineID, cfg.Debug)
+		screen := tui.New(client, cfg.MachineID, client.RemoteMachineID, cfg.Debug)
 		screen.Run()
 		client.Conn.Close()
 		return
@@ -131,10 +131,11 @@ func runSession(ctx context.Context, cfg *config.Config, client *network.Client)
 	go emergencyKillSwitch(ctx, evdev)
 
 	log.Println("")
-	log.Println("Ready! Move your mouse to the screen edge to switch.")
-	log.Println("Press ScrollLock to return input to this machine.")
-	log.Println("Press F1 for emergency kill (releases all devices).")
-	log.Println("Press Ctrl+C to quit.")
+	log.Println("Ready! Use keyboard shortcuts to switch machines.")
+	log.Println("Win+F1 - Switch to Machine 1 (Windows)")
+	log.Println("Win+F2 - Switch to Machine 2 (Linux)")
+	log.Println("F1 - Emergency kill (releases all devices).")
+	log.Println("Ctrl+C - Quit.")
 
 	// Wait for disconnection or context cancellation, then cleanup
 	go func() {
@@ -213,7 +214,7 @@ func runBackgroundServer(server *network.Server) {
 }
 
 func setupInputCapture(cfg *config.Config, client *network.Client) *input.EvdevCapture {
-	evdev := input.NewEvdevCapture(cfg.ScreenWidth, cfg.ScreenHeight, cfg.Edge)
+	evdev := input.NewEvdevCapture(cfg.ScreenWidth, cfg.ScreenHeight)
 
 	// Use auto-discovery by default (recommended - works with all hardware)
 	if cfg.MouseDevice == "" && cfg.KeyboardDevice == "" {
@@ -245,7 +246,7 @@ func setupInputCapture(cfg *config.Config, client *network.Client) *input.EvdevC
 		log.Printf("Using keyboard: %s", kbdDev)
 	}
 
-	log.Printf("Screen: %dx%d, Edge: %s", cfg.ScreenWidth, cfg.ScreenHeight, cfg.Edge)
+	log.Printf("Screen: %dx%d", cfg.ScreenWidth, cfg.ScreenHeight)
 
 	var sendMu sync.Mutex
 	packetID := uint32(100)
@@ -302,8 +303,15 @@ func setupInputCapture(cfg *config.Config, client *network.Client) *input.EvdevC
 		flags := int32(0)
 		action := "DOWN"
 		if !pressed {
-			flags = input.WinKeyEventFKeyUp
+			flags |= input.LLKHF_UP
 			action = "UP"
+		}
+
+		// Set EXTENDED flag for extended keys
+		switch vk {
+		case 0xA3, 0xA5, 0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x28, 0x2D, 0x2E, 0x6F, 0x90:
+			// VK_RCONTROL, VK_RMENU, PgUp, PgDn, End, Home, Left, Up, Right, Down, Insert, Delete, Divide, NumLock
+			flags |= input.LLKHF_EXTENDED
 		}
 
 		log.Printf("[KEYBOARD] Linux code %d -> VK 0x%02X (%s)", code, vk, action)
@@ -498,9 +506,12 @@ func receiveLoop(ctx context.Context, client *network.Client, vi *input.VirtualI
 			log.Printf("[recv] Matrix update")
 
 		case protocol.MachineSwitched:
-			// Windows MWB sends this when mouse hits the edge coming back to us
+			// Windows MWB sends this when returning to local machine
 			log.Printf("[recv] MachineSwitched from %d - returning to local mode", pkt.Header.Src)
 			evdev.Ungrab()
+			
+			// Sync OS cursor to center screen
+			vi.InjectMouse(32768, 32768, 0, input.WinMouseEventFMove|input.WinMouseEventFAbsolute)
 
 		default:
 			if debug {
@@ -665,7 +676,7 @@ func emergencyKillSwitch(ctx context.Context, evdev *input.EvdevCapture) {
 		value := int32(buf[20]) | int32(buf[21])<<8 | int32(buf[22])<<16 | int32(buf[23])<<24
 		evType := uint16(buf[16]) | uint16(buf[17])<<8
 		log.Printf("[emergency] Event type %d, code %d, value %d", evType, code, value)
-		if evType == 1 && code == 59 && value == 1 { // EV_KEY, F1, press
+		if evType == 1 && code == 61 && value == 1 { // EV_KEY, F1, press
 			log.Println("[EMERGENCY] F1 key detected - releasing all devices and exiting!")
 			evdev.Close()
 			os.Exit(1)

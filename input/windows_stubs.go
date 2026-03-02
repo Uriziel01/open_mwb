@@ -25,6 +25,8 @@ func (vi *VirtualInput) InjectMouse(x, y, wheel, flags int32) {}
 
 func (vi *VirtualInput) InjectKeyboard(vk, flags int32) {}
 
+func (vi *VirtualInput) ReleaseAllKeys() {}
+
 
 // EvdevCapture stub for Windows
 type EvdevCapture struct {

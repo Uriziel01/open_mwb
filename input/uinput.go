@@ -73,12 +73,14 @@ type VirtualInput struct {
 	btnLeft      bool
 	btnRight     bool
 	btnMiddle    bool
+	pressedKeys  map[uint16]bool // Track which keys are currently pressed
 }
 
 func NewVirtualInput(screenW, screenH int) (*VirtualInput, error) {
 	vi := &VirtualInput{
-		screenW: screenW,
-		screenH: screenH,
+		screenW:     screenW,
+		screenH:     screenH,
+		pressedKeys: make(map[uint16]bool),
 	}
 
 	var err error
@@ -213,12 +215,36 @@ func (vi *VirtualInput) InjectKeyboard(vk int32, flags int32) {
 		return
 	}
 
+	// Network protocol uses LLKHF flags (0x80 for UP)
+	isKeyUp := flags&LLKHF_UP != 0
+
+	// Track key state to prevent duplicate key down events
+	if isKeyUp {
+		delete(vi.pressedKeys, linuxCode)
+	} else {
+		// If key is already pressed, don't inject another key down event
+		if vi.pressedKeys[linuxCode] {
+			return
+		}
+		vi.pressedKeys[linuxCode] = true
+	}
+
 	value := int32(1)
-	if flags&WinKeyEventFKeyUp != 0 {
+	if isKeyUp {
 		value = 0
 	}
 
 	writeEvent(vi.kbdFile, EV_KEY, linuxCode, value)
+	writeEvent(vi.kbdFile, EV_SYN, SYN_REPORT, 0)
+}
+
+// ReleaseAllKeys releases all currently pressed keys.
+// This should be called when disconnecting to prevent stuck keys.
+func (vi *VirtualInput) ReleaseAllKeys() {
+	for linuxCode := range vi.pressedKeys {
+		writeEvent(vi.kbdFile, EV_KEY, linuxCode, 0)
+		delete(vi.pressedKeys, linuxCode)
+	}
 	writeEvent(vi.kbdFile, EV_SYN, SYN_REPORT, 0)
 }
 
@@ -307,6 +333,9 @@ func (vi *VirtualInput) updateButtons(flags int32) bool {
 }
 
 func (vi *VirtualInput) Close() {
+	// Release all pressed keys before closing to prevent stuck keys
+	vi.ReleaseAllKeys()
+
 	if vi.mouseFile != nil {
 		ioctl(vi.mouseFile.Fd(), UI_DEV_DESTROY, 0)
 		vi.mouseFile.Close()

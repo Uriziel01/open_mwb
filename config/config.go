@@ -28,9 +28,6 @@ type Config struct {
 	ScreenWidth    int    `json:"width"`
 	ScreenHeight   int    `json:"height"`
 
-	// Topology: which edge connects to the remote machine
-	Edge           string `json:"edge"`
-
 	// Input device paths (auto-detected if empty)
 	MouseDevice    string `json:"mouse"`
 	KeyboardDevice string `json:"keyboard"`
@@ -109,7 +106,6 @@ func (c *Config) saveToJSON() error {
 	slim := struct {
 		Key    string `json:"key"`
 		Remote string `json:"remote"`
-		Edge   string `json:"edge"`
 		Mode   string `json:"mode"`
 		ID     uint32 `json:"id"`
 		Name   string `json:"name"`
@@ -117,7 +113,6 @@ func (c *Config) saveToJSON() error {
 	}{
 		Key:    c.SecurityKey,
 		Remote: c.RemoteAddress,
-		Edge:   c.Edge,
 		Mode:   c.Mode,
 		ID:     c.MachineID,
 		Name:   c.MachineName,
@@ -224,18 +219,6 @@ func (c *Config) runOnboarding() {
 		break
 	}
 
-	// --- Edge ---
-	validEdges := map[string]bool{"left": true, "right": true, "top": true, "bottom": true}
-	for {
-		edge := promptDefault(reader, "Edge where Windows screen is (left/right/top/bottom) [right]: ", "right")
-		if !validEdges[edge] {
-			fmt.Println("  Must be one of: left, right, top, bottom")
-			continue
-		}
-		c.Edge = edge
-		break
-	}
-
 	// --- Mode ---
 	validModes := map[string]bool{"client": true, "server": true, "tui": true}
 	for {
@@ -270,7 +253,6 @@ func Parse() *Config {
 		MachineID:    1,
 		ScreenWidth:  1920,
 		ScreenHeight: 1080,
-		Edge:         "right",
 		Mode:         "client",
 	}
 
@@ -283,7 +265,6 @@ func Parse() *Config {
 		flagRemoteID = flag.Uint("remote-id", 0, "Remote machine's MWB ID (from MachinePool)")
 		flagWidth    = flag.Int("width", 0, "Local screen width in pixels")
 		flagHeight   = flag.Int("height", 0, "Local screen height in pixels")
-		flagEdge     = flag.String("edge", "", "Edge where remote machine is (left/right/top/bottom)")
 		flagMouse    = flag.String("mouse", "", "Mouse /dev/input/event path (auto-detect if empty)")
 		flagKeyboard = flag.String("keyboard", "", "Keyboard /dev/input/event path (auto-detect if empty)")
 		flagMode     = flag.String("mode", "", "Run mode: client, server, or tui")
@@ -321,8 +302,6 @@ func Parse() *Config {
 			c.ScreenWidth = *flagWidth
 		case "height":
 			c.ScreenHeight = *flagHeight
-		case "edge":
-			c.Edge = *flagEdge
 		case "mouse":
 			c.MouseDevice = *flagMouse
 		case "keyboard":
@@ -358,11 +337,6 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("remote address is required in %s mode (set in config.json or use --remote)", c.Mode)
 	}
 
-	validEdges := map[string]bool{"left": true, "right": true, "top": true, "bottom": true}
-	if !validEdges[c.Edge] {
-		return fmt.Errorf("edge must be one of: left, right, top, bottom")
-	}
-
 	if c.MachineID == 0 {
 		return fmt.Errorf("machine id is required (set in config.json or use --id)")
 	}
@@ -384,7 +358,6 @@ config.json example:
   {
     "key": "YourSecurityKey",
     "remote": "192.168.1.100",
-    "edge": "right",
     "mode": "client",
     "id": 1001
   }

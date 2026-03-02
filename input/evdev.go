@@ -276,7 +276,6 @@ type EvdevCapture struct {
 	cursorY        int
 	screenW        int
 	screenH        int
-	Edge           string
 	IsRemote       bool
 	OnEdgeHit      func()
 	OnReturn       func()
@@ -286,13 +285,12 @@ type EvdevCapture struct {
 	pressedKeys    map[uint16]bool
 }
 
-func NewEvdevCapture(screenW, screenH int, edge string) *EvdevCapture {
+func NewEvdevCapture(screenW, screenH int) *EvdevCapture {
 	return &EvdevCapture{
 		screenW:     screenW,
 		screenH:     screenH,
 		cursorX:     screenW / 2,
 		cursorY:     screenH / 2,
-		Edge:        edge,
 		pressedKeys: make(map[uint16]bool),
 	}
 }
@@ -488,6 +486,7 @@ func (e *EvdevCapture) Ungrab() error {
 	e.IsRemote = false
 	e.activeMouseDev = nil
 	e.activeKbdDev = nil
+	// Reset cursor to center
 	e.cursorX = e.screenW / 2
 	e.cursorY = e.screenH / 2
 	log.Println("[evdev] Released all devices - local mode")
@@ -560,7 +559,12 @@ func (e *EvdevCapture) runSingleKeyboardLoop(dev *DeviceHandle) {
 			continue
 		}
 
-		pressed := ev.Value == 1 || ev.Value == 2
+		// Skip auto-repeat events (ev.Value == 2) to prevent keys from getting stuck
+		// Only process actual key press (1) and key release (0) events
+		if ev.Value == 2 {
+			continue
+		}
+		pressed := ev.Value == 1
 
 		e.mu.Lock()
 		isRemote := e.IsRemote
@@ -583,14 +587,42 @@ func (e *EvdevCapture) runSingleKeyboardLoop(dev *DeviceHandle) {
 				continue
 			}
 
-			// ScrollLock to return to local mode (works from active keyboard)
-			if ev.Code == 70 && ev.Value == 1 {
-				log.Println("[evdev] ScrollLock - returning to local")
-				e.Ungrab()
-				if e.OnReturn != nil {
-					e.OnReturn()
+			// Win+F1 to switch to Machine 1 (Windows)
+			// Win+F2 to switch to Machine 2 (Linux)
+			if ev.Code == 59 && ev.Value == 1 { // F1 pressed
+				e.mu.Lock()
+				_, hasWin := e.pressedKeys[125] // Left Win key (KEY_LEFTMETA)
+				if !hasWin {
+					_, hasWin = e.pressedKeys[126] // Right Win key (KEY_RIGHTMETA)
 				}
-				continue
+				e.mu.Unlock()
+				
+				if hasWin {
+					log.Println("[evdev] Win+F1 - switching to Machine 1 (Windows)")
+					e.Ungrab()
+					if e.OnReturn != nil {
+						e.OnReturn()
+					}
+					continue
+				}
+			}
+			
+			if ev.Code == 60 && ev.Value == 1 { // F2 pressed
+				e.mu.Lock()
+				_, hasWin := e.pressedKeys[125] // Left Win key (KEY_LEFTMETA)
+				if !hasWin {
+					_, hasWin = e.pressedKeys[126] // Right Win key (KEY_RIGHTMETA)
+				}
+				e.mu.Unlock()
+				
+				if hasWin {
+					log.Println("[evdev] Win+F2 - switching to Machine 2 (Linux)")
+					e.Ungrab()
+					if e.OnReturn != nil {
+						e.OnReturn()
+					}
+					continue
+				}
 			}
 
 			if e.OnKeyEvent != nil {
@@ -606,18 +638,45 @@ func (e *EvdevCapture) runSingleKeyboardLoop(dev *DeviceHandle) {
 			}
 			e.mu.Unlock()
 
-			// Right Shift + Right Ctrl to enter remote mode (alternative to edge detection)
-			if ev.Code == 54 && ev.Value == 1 { // Right Shift
+			// Win+F1 to switch to remote (Machine 1 - Windows)
+			// Win+F2 to switch to remote (Machine 2 - Linux)
+			if ev.Code == 59 && ev.Value == 1 { // F1 pressed
 				e.mu.Lock()
-				_, hasRightCtrl := e.pressedKeys[97] // Right Ctrl (97)
-				// Get first mouse for keyboard-triggered transition
+				_, hasWin := e.pressedKeys[125] // Left Win key (KEY_LEFTMETA)
+				if !hasWin {
+					_, hasWin = e.pressedKeys[126] // Right Win key (KEY_RIGHTMETA)
+				}
+				// Get first mouse for transition
 				var firstMouse *DeviceHandle
 				if len(e.mouseDevs) > 0 {
 					firstMouse = e.mouseDevs[0]
 				}
 				e.mu.Unlock()
-				if hasRightCtrl && firstMouse != nil {
-					log.Println("[evdev] Right Shift+Ctrl - entering remote mode")
+				
+				if hasWin && firstMouse != nil {
+					log.Println("[evdev] Win+F1 - entering remote mode (Machine 1)")
+					e.Grab(firstMouse)
+					if e.OnEdgeHit != nil {
+						e.OnEdgeHit()
+					}
+				}
+			}
+			
+			if ev.Code == 60 && ev.Value == 1 { // F2 pressed
+				e.mu.Lock()
+				_, hasWin := e.pressedKeys[125] // Left Win key (KEY_LEFTMETA)
+				if !hasWin {
+					_, hasWin = e.pressedKeys[126] // Right Win key (KEY_RIGHTMETA)
+				}
+				// Get first mouse for transition
+				var firstMouse *DeviceHandle
+				if len(e.mouseDevs) > 0 {
+					firstMouse = e.mouseDevs[0]
+				}
+				e.mu.Unlock()
+				
+				if hasWin && firstMouse != nil {
+					log.Println("[evdev] Win+F2 - entering remote mode (Machine 2)")
 					e.Grab(firstMouse)
 					if e.OnEdgeHit != nil {
 						e.OnEdgeHit()
@@ -629,43 +688,17 @@ func (e *EvdevCapture) runSingleKeyboardLoop(dev *DeviceHandle) {
 }
 
 func (e *EvdevCapture) handleLocalMouseEvent(ev InputEvent, dev *DeviceHandle) {
+	// Local mode: just track mouse movement for local use
+	// No edge detection - we use Win+F1/F2 shortcuts for switching
 	if ev.Type == EV_REL {
 		e.mu.Lock()
 		switch ev.Code {
 		case REL_X:
 			e.cursorX += int(ev.Value)
-			e.cursorX = clamp(e.cursorX, 0, e.screenW-1)
 		case REL_Y:
 			e.cursorY += int(ev.Value)
-			e.cursorY = clamp(e.cursorY, 0, e.screenH-1)
 		}
-
-		cursorX := e.cursorX
-		cursorY := e.cursorY
-		screenW := e.screenW
-		screenH := e.screenH
-		edge := e.Edge
 		e.mu.Unlock()
-
-		edgeHit := false
-		switch edge {
-		case "right":
-			edgeHit = cursorX >= screenW-1
-		case "left":
-			edgeHit = cursorX <= 0
-		case "top":
-			edgeHit = cursorY <= 0
-		case "bottom":
-			edgeHit = cursorY >= screenH-1
-		}
-
-		if edgeHit {
-			log.Printf("[evdev] Edge %q hit on %s - switching to remote", edge, dev.Info.Name)
-			e.Grab(dev)
-			if e.OnEdgeHit != nil {
-				e.OnEdgeHit()
-			}
-		}
 	}
 }
 
@@ -725,4 +758,24 @@ func clamp(v, min, max int) int {
 		return max
 	}
 	return v
+}
+
+// applyAcceleration adds a simple non-linear acceleration curve to raw mouse movements.
+// This helps the simulated cursor position stay in sync with the OS's accelerated cursor.
+func applyAcceleration(val int) int {
+	absVal := val
+	if absVal < 0 {
+		absVal = -absVal
+	}
+	
+	// Fast movement: increase speed significantly
+	if absVal > 15 {
+		return val * 3
+	}
+	// Medium movement: slight acceleration
+	if absVal > 5 {
+		return val * 2
+	}
+	// Slow movement: raw 1:1 speed
+	return val
 }

@@ -34,9 +34,6 @@ type Screen struct {
 	RemoteCursorX int32
 	RemoteCursorY int32
 
-	// Edge config
-	Edge string
-
 	// State
 	IsRemote bool
 	Status   string
@@ -52,7 +49,7 @@ type Screen struct {
 }
 
 // New creates a new TUI debug screen.
-func New(edge string, client *network.Client, machineID, remoteMachineID uint32, debug bool) *Screen {
+func New(client *network.Client, machineID, remoteMachineID uint32, debug bool) *Screen {
 	_ = debug // reserved for future use
 
 	// Get actual terminal size
@@ -80,14 +77,13 @@ func New(edge string, client *network.Client, machineID, remoteMachineID uint32,
 		Height:          contentHeight,
 		CursorX:         contentWidth / 2,
 		CursorY:         contentHeight / 2,
-		Edge:            edge,
 		Client:          client,
 		MachineID:       machineID,
 		RemoteMachineID: remoteMachineID,
 		PacketID:        100,
 		RemoteCursorX:   32768,
 		RemoteCursorY:   32768,
-		Status:          "LOCAL - use arrows to move, hit edge to switch",
+		Status:          "LOCAL - use F1/F2 to switch machines",
 	}
 }
 
@@ -233,34 +229,10 @@ func (s *Screen) handleArrowKey(dx, dy int) {
 		return
 	}
 
-	// Local mode: move cursor and check edge
+	// Local mode: just move cursor
 	s.CursorX += dx
 	s.CursorY += dy
-
-	// Check edge before clamping
-	edgeHit := false
-	switch s.Edge {
-	case "right":
-		edgeHit = s.CursorX >= s.Width-1
-	case "left":
-		edgeHit = s.CursorX <= 0
-	case "top":
-		edgeHit = s.CursorY <= 0
-	case "bottom":
-		edgeHit = s.CursorY >= s.Height-1
-	}
-
 	s.clampCursor()
-
-	if edgeHit {
-		s.IsRemote = true
-		s.Status = fmt.Sprintf("REMOTE - controlling Windows! (space=return)")
-		s.RemoteCursorX = 32768
-		s.RemoteCursorY = 32768
-		s.renderLocked()
-		return
-	}
-
 	s.renderLocked()
 }
 
@@ -298,8 +270,8 @@ func (s *Screen) renderLocked() {
 		modeColor = "\033[31m" // red = remote
 		modeLabel = "REMOTE"
 	}
-	b.WriteString(fmt.Sprintf(" %s⬤ %s\033[0m  MWB Debug TUI  |  Edge: %s  |  Cursor: (%d,%d)\n",
-		modeColor, modeLabel, s.Edge, s.CursorX, s.CursorY))
+	b.WriteString(fmt.Sprintf(" %s⬤ %s\033[0m  MWB Debug TUI  |  Cursor: (%d,%d)\n",
+		modeColor, modeLabel, s.CursorX, s.CursorY))
 
 	// Top border
 	b.WriteString(" ┌")
@@ -317,23 +289,7 @@ func (s *Screen) renderLocked() {
 					b.WriteString("\033[32m█\033[0m") // green cursor in local mode
 				}
 			} else {
-				// Draw edge indicators
-				isEdge := false
-				switch s.Edge {
-				case "right":
-					isEdge = x == s.Width-1
-				case "left":
-					isEdge = x == 0
-				case "top":
-					isEdge = y == 0
-				case "bottom":
-					isEdge = y == s.Height-1
-				}
-				if isEdge {
-					b.WriteString("\033[33m·\033[0m") // yellow dots for the active edge
-				} else {
-					b.WriteByte(' ')
-				}
+				b.WriteByte(' ')
 			}
 		}
 		b.WriteString("│\n")
@@ -415,7 +371,7 @@ func (s *Screen) receiveLoop() {
 		case protocol.Keyboard:
 			if pkt.Keyboard != nil {
 				action := "DOWN"
-				if pkt.Keyboard.Flags&int32(input.WinKeyEventFKeyUp) != 0 {
+				if pkt.Keyboard.Flags&int32(input.LLKHF_UP) != 0 {
 					action = "UP"
 				}
 				s.Status = fmt.Sprintf("Recv key: VK=0x%X %s", pkt.Keyboard.Vk, action)

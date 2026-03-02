@@ -148,10 +148,18 @@ func init() {
 	}
 }
 
+// Windows LLKHF (Low-Level Keyboard Hook Flags) - used in MWB network protocol
+const (
+	LLKHF_EXTENDED = 0x01
+	LLKHF_INJECTED = 0x10
+	LLKHF_ALTDOWN  = 0x20
+	LLKHF_UP       = 0x80
+)
+
 // Windows KEYEVENTF flags
 const (
-	WinKeyEventFKeyUp       = 0x0002
 	WinKeyEventFExtendedKey = 0x0001
+	WinKeyEventFKeyUp       = 0x0002
 )
 
 // Windows MOUSEEVENTF flags (for SendInput API)

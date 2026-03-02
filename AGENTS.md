@@ -21,5 +21,5 @@ distrobox enter mwb-dev -- go build -o open-mwb .
 We execute the program on the host machine, some functions like clipboard and mouse/keyboard interactions need `sudo` to work properly.
 
 ```bash
-sudo ./open-mwb
+sudo -E ./open-mwb --mode client
 ```
