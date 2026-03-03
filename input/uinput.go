@@ -31,6 +31,8 @@ const (
 	BTN_LEFT   = 0x110
 	BTN_RIGHT  = 0x111
 	BTN_MIDDLE = 0x112
+	BTN_SIDE   = 0x113 // Mouse button 4 (Back)
+	BTN_EXTRA  = 0x114 // Mouse button 5 (Forward)
 	SYN_REPORT = 0x00
 )
 
@@ -73,6 +75,8 @@ type VirtualInput struct {
 	btnLeft      bool
 	btnRight     bool
 	btnMiddle    bool
+	btnSide      bool // Mouse button 4 (Back)
+	btnExtra     bool // Mouse button 5 (Forward)
 	pressedKeys  map[uint16]bool // Track which keys are currently pressed
 }
 
@@ -122,7 +126,7 @@ func (vi *VirtualInput) setupMouse() error {
 		}
 	}
 
-	for _, btn := range []uintptr{BTN_LEFT, BTN_RIGHT, BTN_MIDDLE} {
+	for _, btn := range []uintptr{BTN_LEFT, BTN_RIGHT, BTN_MIDDLE, BTN_SIDE, BTN_EXTRA} {
 		if err := ioctl(fd, UI_SET_KEYBIT, btn); err != nil {
 			return fmt.Errorf("set key bit %d: %w", btn, err)
 		}
@@ -293,39 +297,75 @@ func (vi *VirtualInput) InjectMouse(x, y, wheelDelta, flags int32) {
 }
 
 func (vi *VirtualInput) updateButtons(flags int32) bool {
-	leftDown := flags&0x0001 != 0
-	rightDown := flags&0x0002 != 0
-	middleDown := flags&0x0010 != 0
+	// Windows MWB sends WM_* message types, not bit flags
+	// Check exact message types to determine button state
+	isLDown := flags == WM_LBUTTONDOWN
+	isLUp := flags == WM_LBUTTONUP
+	isRDown := flags == WM_RBUTTONDOWN
+	isRUp := flags == WM_RBUTTONUP
+	isMDown := flags == WM_MBUTTONDOWN
+	isMUp := flags == WM_MBUTTONUP
+	// For X buttons, the flags include MK_XBUTTON1 or MK_XBUTTON2 in high bits
+	// We need to check the base message type and the button indicator
+	isXDown := flags&0xFFFF == WM_XBUTTONDOWN
+	isXUp := flags&0xFFFF == WM_XBUTTONUP
+	isXButton1 := flags&WinMouseMKXButton1 != 0
+	isXButton2 := flags&WinMouseMKXButton2 != 0
 
 	changed := false
 
-	if leftDown != vi.btnLeft {
-		vi.btnLeft = leftDown
-		value := int32(0)
-		if leftDown {
-			value = 1
-		}
-		writeEvent(vi.mouseFile, EV_KEY, BTN_LEFT, value)
+	// Handle LEFT button
+	if isLDown && !vi.btnLeft {
+		vi.btnLeft = true
+		writeEvent(vi.mouseFile, EV_KEY, BTN_LEFT, 1)
+		changed = true
+	} else if isLUp && vi.btnLeft {
+		vi.btnLeft = false
+		writeEvent(vi.mouseFile, EV_KEY, BTN_LEFT, 0)
 		changed = true
 	}
 
-	if rightDown != vi.btnRight {
-		vi.btnRight = rightDown
-		value := int32(0)
-		if rightDown {
-			value = 1
-		}
-		writeEvent(vi.mouseFile, EV_KEY, BTN_RIGHT, value)
+	// Handle RIGHT button
+	if isRDown && !vi.btnRight {
+		vi.btnRight = true
+		writeEvent(vi.mouseFile, EV_KEY, BTN_RIGHT, 1)
+		changed = true
+	} else if isRUp && vi.btnRight {
+		vi.btnRight = false
+		writeEvent(vi.mouseFile, EV_KEY, BTN_RIGHT, 0)
 		changed = true
 	}
 
-	if middleDown != vi.btnMiddle {
-		vi.btnMiddle = middleDown
-		value := int32(0)
-		if middleDown {
-			value = 1
-		}
-		writeEvent(vi.mouseFile, EV_KEY, BTN_MIDDLE, value)
+	// Handle MIDDLE button
+	if isMDown && !vi.btnMiddle {
+		vi.btnMiddle = true
+		writeEvent(vi.mouseFile, EV_KEY, BTN_MIDDLE, 1)
+		changed = true
+	} else if isMUp && vi.btnMiddle {
+		vi.btnMiddle = false
+		writeEvent(vi.mouseFile, EV_KEY, BTN_MIDDLE, 0)
+		changed = true
+	}
+
+	// Handle XBUTTON1 (Side/Back - button 4)
+	if isXDown && isXButton1 && !vi.btnSide {
+		vi.btnSide = true
+		writeEvent(vi.mouseFile, EV_KEY, BTN_SIDE, 1)
+		changed = true
+	} else if isXUp && isXButton1 && vi.btnSide {
+		vi.btnSide = false
+		writeEvent(vi.mouseFile, EV_KEY, BTN_SIDE, 0)
+		changed = true
+	}
+
+	// Handle XBUTTON2 (Extra/Forward - button 5)
+	if isXDown && isXButton2 && !vi.btnExtra {
+		vi.btnExtra = true
+		writeEvent(vi.mouseFile, EV_KEY, BTN_EXTRA, 1)
+		changed = true
+	} else if isXUp && isXButton2 && vi.btnExtra {
+		vi.btnExtra = false
+		writeEvent(vi.mouseFile, EV_KEY, BTN_EXTRA, 0)
 		changed = true
 	}
 

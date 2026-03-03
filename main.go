@@ -9,6 +9,7 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -128,13 +129,12 @@ func runSession(ctx context.Context, cfg *config.Config, client *network.Client)
 	go clip.Watch()
 	go sendHeartbeats(ctx, client, cfg)
 	go receiveLoop(ctx, client, vi, clip, evdev, cfg.Debug, disconnectCh)
-	go emergencyKillSwitch(ctx, evdev)
 
 	log.Println("")
 	log.Println("Ready! Use keyboard shortcuts to switch machines.")
 	log.Println("Win+F1 - Switch to Machine 1 (Windows)")
 	log.Println("Win+F2 - Switch to Machine 2 (Linux)")
-	log.Println("F1 - Emergency kill (releases all devices).")
+	log.Println("F3 - Emergency kill (releases all devices).")
 	log.Println("Ctrl+C - Quit.")
 
 	// Wait for disconnection or context cancellation, then cleanup
@@ -265,6 +265,12 @@ func setupInputCapture(cfg *config.Config, client *network.Client) *input.EvdevC
 
 	evdev.OnReturn = func() {
 		log.Println("[main] Returning to local")
+	}
+
+	evdev.OnEmergency = func() {
+		log.Println("[EMERGENCY] F3 key detected - releasing all devices and exiting!")
+		evdev.Close()
+		os.Exit(1)
 	}
 
 	evdev.OnMouseEvent = func(dx, dy, wheel int) {
@@ -451,6 +457,12 @@ func sendHeartbeats(ctx context.Context, client *network.Client, cfg *config.Con
 func receiveLoop(ctx context.Context, client *network.Client, vi *input.VirtualInput, clip *clipboard.Clipboard, evdev *input.EvdevCapture, debug bool, disconnectCh chan<- struct{}) {
 	var clipboardBuffer []byte
 	var receivingClipboard bool
+	
+	// Track pressed keys for debugging
+	pressedKeys := make(map[uint16]bool)
+	
+	// Track mouse button states to detect stuck buttons
+	var leftDown, rightDown, middleDown, sideDown, extraDown bool
 
 	for {
 		// Check for context cancellation
@@ -474,11 +486,111 @@ func receiveLoop(ctx context.Context, client *network.Client, vi *input.VirtualI
 		switch pkt.Header.Type {
 		case protocol.Mouse:
 			if pkt.Mouse != nil {
+				flags := pkt.Mouse.Flags
+				
+				// Track button states from previous packet
+				// Use a static variable to track state between calls
+				// Since Go doesn't have static variables, we use a closure variable
+				// Actually, we need to track this at a higher scope
+				
+				// Windows MWB sends WM_ constants as flags
+				// Check exact message type, not just bits
+				isLDown := flags == input.WM_LBUTTONDOWN
+				isLUp := flags == input.WM_LBUTTONUP
+				isRDown := flags == input.WM_RBUTTONDOWN
+				isRUp := flags == input.WM_RBUTTONUP
+				isMDown := flags == input.WM_MBUTTONDOWN
+				isMUp := flags == input.WM_MBUTTONUP
+				// For X buttons, check the base message type (low 16 bits) and button indicator
+				isXDown := flags&0xFFFF == input.WM_XBUTTONDOWN
+				isXUp := flags&0xFFFF == input.WM_XBUTTONUP
+				isXButton1 := flags&input.WinMouseMKXButton1 != 0
+				isXButton2 := flags&input.WinMouseMKXButton2 != 0
+				isWheel := flags == input.WM_MOUSEWHEEL
+				isMove := flags == input.WM_MOUSEMOVE
+
+				// Update button state tracking
+				if isLDown {
+					leftDown = true
+				} else if isLUp {
+					leftDown = false
+				}
+				if isRDown {
+					rightDown = true
+				} else if isRUp {
+					rightDown = false
+				}
+				if isMDown {
+					middleDown = true
+				} else if isMUp {
+					middleDown = false
+				}
+				if isXDown && isXButton1 {
+					sideDown = true
+				} else if isXUp && isXButton1 {
+					sideDown = false
+				}
+				if isXDown && isXButton2 {
+					extraDown = true
+				} else if isXUp && isXButton2 {
+					extraDown = false
+				}
+
+				action := "OTHER"
+				switch {
+				case isLDown:
+					action = "LEFT_DOWN"
+				case isLUp:
+					action = "LEFT_UP"
+				case isRDown:
+					action = "RIGHT_DOWN"
+				case isRUp:
+					action = "RIGHT_UP"
+				case isMDown:
+					action = "MIDDLE_DOWN"
+				case isMUp:
+					action = "MIDDLE_UP"
+				case isXDown && isXButton1:
+					action = "SIDE_DOWN"
+				case isXUp && isXButton1:
+					action = "SIDE_UP"
+				case isXDown && isXButton2:
+					action = "EXTRA_DOWN"
+				case isXUp && isXButton2:
+					action = "EXTRA_UP"
+				case isWheel:
+					action = fmt.Sprintf("WHEEL(%d)", pkt.Mouse.WheelDelta)
+				case isMove:
+					action = "MOVE"
+				default:
+					action = fmt.Sprintf("FLAGS(0x%04X)", flags)
+				}
+
+				log.Printf("[REMOTE-IN] Mouse %s | Pos(%d,%d) | RawFlags(0x%08X) | Btn[L=%v,R=%v,M=%v,X1=%v,X2=%v] | HeldKeys: %v",
+					action, pkt.Mouse.X, pkt.Mouse.Y, flags, leftDown, rightDown, middleDown, sideDown, extraDown, formatHeldKeys(pressedKeys))
+				
 				vi.InjectMouse(pkt.Mouse.X, pkt.Mouse.Y, pkt.Mouse.WheelDelta, pkt.Mouse.Flags)
 			}
 
 		case protocol.Keyboard:
 			if pkt.Keyboard != nil {
+				vk := uint16(pkt.Keyboard.Vk)
+				flags := pkt.Keyboard.Flags
+				isPressed := flags&input.LLKHF_UP == 0
+				isExtended := flags&input.LLKHF_EXTENDED != 0
+				
+				action := "KEY_UP"
+				if isPressed {
+					action = "KEY_DOWN"
+					pressedKeys[vk] = true
+				} else {
+					delete(pressedKeys, vk)
+				}
+				
+				keyName := vkToName(vk)
+				log.Printf("[REMOTE-IN] Keyboard %s | VK(0x%02X=%s) | Extended=%v | Flags(0x%08X) | HeldKeys: %v",
+					action, vk, keyName, isExtended, flags, formatHeldKeys(pressedKeys))
+				
 				vi.InjectKeyboard(pkt.Keyboard.Vk, pkt.Keyboard.Flags)
 			}
 
@@ -637,9 +749,9 @@ func runDemo(cfg *config.Config) {
 	fmt.Println("Done! Did the cursor move?")
 }
 
-// emergencyKillSwitch monitors for F1 key and kills the app immediately
+// emergencyKillSwitch monitors for F3 key and kills the app immediately
 // This is a safety mechanism to prevent getting locked out
-// F1 is KEY_F1 = 59 in Linux input event codes
+// F3 is KEY_F3 = 61 in Linux input event codes
 func emergencyKillSwitch(ctx context.Context, evdev *input.EvdevCapture) {
 	// Open keyboard device directly for monitoring
 	kbdPath := "/dev/input/event7"
@@ -670,16 +782,67 @@ func emergencyKillSwitch(ctx context.Context, evdev *input.EvdevCapture) {
 			return
 		}
 
-		// Check for F1 key (code 59) press
+		// Check for F3 key (code 61) press
 		// Input event: [time 16 bytes][type 2 bytes][code 2 bytes][value 4 bytes]
 		code := uint16(buf[18]) | uint16(buf[19])<<8
 		value := int32(buf[20]) | int32(buf[21])<<8 | int32(buf[22])<<16 | int32(buf[23])<<24
 		evType := uint16(buf[16]) | uint16(buf[17])<<8
 		log.Printf("[emergency] Event type %d, code %d, value %d", evType, code, value)
-		if evType == 1 && code == 61 && value == 1 { // EV_KEY, F1, press
-			log.Println("[EMERGENCY] F1 key detected - releasing all devices and exiting!")
+		if evType == 1 && code == 61 && value == 1 { // EV_KEY, F3, press
+			log.Println("[EMERGENCY] F3 key detected - releasing all devices and exiting!")
 			evdev.Close()
 			os.Exit(1)
 		}
 	}
+}
+
+// vkToName converts a Windows VK code to a readable name
+func vkToName(vk uint16) string {
+	names := map[uint16]string{
+		0x01: "LMB", 0x02: "RMB", 0x04: "MMB",
+		0x08: "BACK", 0x09: "TAB", 0x0D: "ENTER",
+		0x10: "SHIFT", 0x11: "CTRL", 0x12: "ALT",
+		0x13: "PAUSE", 0x14: "CAPS", 0x1B: "ESC",
+		0x20: "SPACE", 0x21: "PGUP", 0x22: "PGDN",
+		0x23: "END", 0x24: "HOME", 0x25: "LEFT",
+		0x26: "UP", 0x27: "RIGHT", 0x28: "DOWN",
+		0x2D: "INS", 0x2E: "DEL",
+		0x30: "0", 0x31: "1", 0x32: "2", 0x33: "3", 0x34: "4",
+		0x35: "5", 0x36: "6", 0x37: "7", 0x38: "8", 0x39: "9",
+		0x41: "A", 0x42: "B", 0x43: "C", 0x44: "D", 0x45: "E",
+		0x46: "F", 0x47: "G", 0x48: "H", 0x49: "I", 0x4A: "J",
+		0x4B: "K", 0x4C: "L", 0x4D: "M", 0x4E: "N", 0x4F: "O",
+		0x50: "P", 0x51: "Q", 0x52: "R", 0x53: "S", 0x54: "T",
+		0x55: "U", 0x56: "V", 0x57: "W", 0x58: "X", 0x59: "Y", 0x5A: "Z",
+		0x5B: "LWIN", 0x5C: "RWIN", 0x5D: "APPS",
+		0x60: "NUM0", 0x61: "NUM1", 0x62: "NUM2", 0x63: "NUM3", 0x64: "NUM4",
+		0x65: "NUM5", 0x66: "NUM6", 0x67: "NUM7", 0x68: "NUM8", 0x69: "NUM9",
+		0x6A: "MULT", 0x6B: "ADD", 0x6C: "SEP", 0x6D: "SUB", 0x6E: "DEC", 0x6F: "DIV",
+		0x70: "F1", 0x71: "F2", 0x72: "F3", 0x73: "F4", 0x74: "F5",
+		0x75: "F6", 0x76: "F7", 0x77: "F8", 0x78: "F9", 0x79: "F10",
+		0x7A: "F11", 0x7B: "F12",
+		0x90: "NUMLOCK", 0x91: "SCROLL",
+		0xA0: "LSHIFT", 0xA1: "RSHIFT",
+		0xA2: "LCTRL", 0xA3: "RCTRL",
+		0xA4: "LALT", 0xA5: "RALT",
+		0xBA: "SEMICOLON", 0xBB: "PLUS", 0xBC: "COMMA", 0xBD: "MINUS",
+		0xBE: "PERIOD", 0xBF: "SLASH", 0xC0: "GRAVE",
+		0xDB: "LBRACKET", 0xDC: "BACKSLASH", 0xDD: "RBRACKET", 0xDE: "QUOTE",
+	}
+	if name, ok := names[vk]; ok {
+		return name
+	}
+	return fmt.Sprintf("VK_%02X", vk)
+}
+
+// formatHeldKeys returns a string representation of currently held keys
+func formatHeldKeys(pressedKeys map[uint16]bool) string {
+	if len(pressedKeys) == 0 {
+		return "NONE"
+	}
+	var keys []string
+	for vk := range pressedKeys {
+		keys = append(keys, vkToName(vk))
+	}
+	return fmt.Sprintf("[%s]", strings.Join(keys, ","))
 }

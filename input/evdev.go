@@ -122,7 +122,7 @@ func classifyDevice(caps DeviceCapabilities) (isMouse, isKeyboard, isTouchpad bo
 	// A device is a mouse if:
 	// 1. It has EV_REL and (REL_X or REL_Y) - relative movement
 	// 2. Or it has EV_ABS and (ABS_X and ABS_Y) - absolute movement (touchscreens, tablets)
-	// 3. And it has at least one mouse button (BTN_LEFT, BTN_RIGHT, BTN_MIDDLE)
+	// 3. And it has at least one mouse button (BTN_LEFT, BTN_RIGHT, BTN_MIDDLE, BTN_SIDE, BTN_EXTRA)
 
 	if hasBit(caps.EvBits[:], EV_REL) {
 		hasRelX := hasBit(caps.RelBits[:], REL_X)
@@ -282,6 +282,7 @@ type EvdevCapture struct {
 	OnMouseEvent   func(dx, dy, wheelDelta int)
 	OnKeyEvent     func(code uint16, pressed bool)
 	OnButtonEvent  func(code uint16, pressed bool)
+	OnEmergency    func() // Called when F3 is pressed (emergency kill switch)
 	pressedKeys    map[uint16]bool
 }
 
@@ -425,7 +426,9 @@ func (e *EvdevCapture) Grab(activeMouse *DeviceHandle) error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
-	// Only grab the specific mouse that triggered the transition
+	// Grab the specific mouse that triggered the transition (if any)
+	// If activeMouse is nil, we're switching via keyboard shortcut and will
+	// wait for the first pointer event to determine which mouse to grab
 	if activeMouse != nil && !activeMouse.Grabbed {
 		_, _, errno := unix.Syscall(unix.SYS_IOCTL, activeMouse.File.Fd(), EVIOCGRAB, 1)
 		if errno != 0 {
@@ -435,6 +438,10 @@ func (e *EvdevCapture) Grab(activeMouse *DeviceHandle) error {
 			e.activeMouseDev = activeMouse
 			log.Printf("[evdev] Grabbed mouse: %s", activeMouse.Info.Name)
 		}
+	} else if activeMouse == nil {
+		// When switching via keyboard, don't grab any mouse yet
+		// The mouse loop will grab the first device that sends a pointer event
+		log.Printf("[evdev] Switching via keyboard - waiting for first pointer event to grab mouse")
 	}
 
 	// Grab keyboard for remote typing
@@ -519,6 +526,30 @@ func (e *EvdevCapture) runSingleMouseLoop(dev *DeviceHandle) {
 		e.mu.Lock()
 		isRemote := e.IsRemote
 		activeMouse := e.activeMouseDev
+
+		if isRemote {
+			// In remote mode, check if we need to set active mouse
+			// This happens when switching via keyboard shortcut (activeMouse is nil)
+			if activeMouse == nil {
+				// Check if this is a pointer movement event (relative or absolute)
+				if ev.Type == EV_REL || ev.Type == EV_ABS {
+					// First pointer event received - grab this device
+					// Double-check still in remote mode and no active mouse set
+					if e.IsRemote && e.activeMouseDev == nil {
+						e.activeMouseDev = dev
+						activeMouse = dev
+						// Grab this mouse device
+						_, _, errno := unix.Syscall(unix.SYS_IOCTL, dev.File.Fd(), EVIOCGRAB, 1)
+						if errno != 0 {
+							log.Printf("[evdev] Warning: failed to grab mouse %s: %v", dev.Info.Path, errno)
+						} else {
+							dev.Grabbed = true
+							log.Printf("[evdev] Grabbed mouse from pointer event: %s", dev.Info.Name)
+						}
+					}
+				}
+			}
+		}
 		e.mu.Unlock()
 
 		if isRemote {
@@ -566,10 +597,68 @@ func (e *EvdevCapture) runSingleKeyboardLoop(dev *DeviceHandle) {
 		}
 		pressed := ev.Value == 1
 
+		// Track pressed keys globally on ALL keyboards (both local and remote mode)
+		// This is needed for global shortcuts like Win+F1/F2
 		e.mu.Lock()
+		if pressed {
+			e.pressedKeys[ev.Code] = true
+		} else {
+			delete(e.pressedKeys, ev.Code)
+		}
 		isRemote := e.IsRemote
 		activeKbd := e.activeKbdDev
 		e.mu.Unlock()
+
+		// Handle emergency button (F3) on ALL keyboards in both local and remote mode
+		// This ensures the emergency button works even when devices are grabbed
+		if ev.Code == 61 && ev.Value == 1 { // F3 pressed
+			log.Println("[evdev] F3 (emergency) detected on keyboard")
+			if e.OnEmergency != nil {
+				e.OnEmergency()
+			}
+		}
+
+		// Check machine switching shortcuts on ALL keyboards in remote mode
+		// This ensures Win+F1/F2 work regardless of which keyboard sent the event
+		if isRemote {
+			// Win+F1 to switch to Machine 1 (Windows)
+			if ev.Code == 59 && ev.Value == 1 { // F1 pressed
+				e.mu.Lock()
+				_, hasWin := e.pressedKeys[125] // Left Win key (KEY_LEFTMETA)
+				if !hasWin {
+					_, hasWin = e.pressedKeys[126] // Right Win key (KEY_RIGHTMETA)
+				}
+				e.mu.Unlock()
+
+				if hasWin {
+					log.Println("[evdev] Win+F1 - switching to Machine 1 (Windows)")
+					e.Ungrab()
+					if e.OnReturn != nil {
+						e.OnReturn()
+					}
+					continue
+				}
+			}
+
+			// Win+F2 to switch to Machine 2 (Linux)
+			if ev.Code == 60 && ev.Value == 1 { // F2 pressed
+				e.mu.Lock()
+				_, hasWin := e.pressedKeys[125] // Left Win key (KEY_LEFTMETA)
+				if !hasWin {
+					_, hasWin = e.pressedKeys[126] // Right Win key (KEY_RIGHTMETA)
+				}
+				e.mu.Unlock()
+
+				if hasWin {
+					log.Println("[evdev] Win+F2 - switching to Machine 2 (Linux)")
+					e.Ungrab()
+					if e.OnReturn != nil {
+						e.OnReturn()
+					}
+					continue
+				}
+			}
+		}
 
 		if isRemote {
 			// In remote mode, only accept events from the active keyboard
@@ -587,97 +676,43 @@ func (e *EvdevCapture) runSingleKeyboardLoop(dev *DeviceHandle) {
 				continue
 			}
 
-			// Win+F1 to switch to Machine 1 (Windows)
-			// Win+F2 to switch to Machine 2 (Linux)
-			if ev.Code == 59 && ev.Value == 1 { // F1 pressed
-				e.mu.Lock()
-				_, hasWin := e.pressedKeys[125] // Left Win key (KEY_LEFTMETA)
-				if !hasWin {
-					_, hasWin = e.pressedKeys[126] // Right Win key (KEY_RIGHTMETA)
-				}
-				e.mu.Unlock()
-				
-				if hasWin {
-					log.Println("[evdev] Win+F1 - switching to Machine 1 (Windows)")
-					e.Ungrab()
-					if e.OnReturn != nil {
-						e.OnReturn()
-					}
-					continue
-				}
-			}
-			
-			if ev.Code == 60 && ev.Value == 1 { // F2 pressed
-				e.mu.Lock()
-				_, hasWin := e.pressedKeys[125] // Left Win key (KEY_LEFTMETA)
-				if !hasWin {
-					_, hasWin = e.pressedKeys[126] // Right Win key (KEY_RIGHTMETA)
-				}
-				e.mu.Unlock()
-				
-				if hasWin {
-					log.Println("[evdev] Win+F2 - switching to Machine 2 (Linux)")
-					e.Ungrab()
-					if e.OnReturn != nil {
-						e.OnReturn()
-					}
-					continue
-				}
-			}
-
 			if e.OnKeyEvent != nil {
 				e.OnKeyEvent(ev.Code, pressed)
 			}
 		} else {
-			// Track pressed keys in local mode (any keyboard)
-			e.mu.Lock()
-			if pressed {
-				e.pressedKeys[ev.Code] = true
-			} else {
-				delete(e.pressedKeys, ev.Code)
-			}
-			e.mu.Unlock()
-
-			// Win+F1 to switch to remote (Machine 1 - Windows)
-			// Win+F2 to switch to remote (Machine 2 - Linux)
+			// Local mode: Check Win+F1/F2 to switch to remote
 			if ev.Code == 59 && ev.Value == 1 { // F1 pressed
 				e.mu.Lock()
 				_, hasWin := e.pressedKeys[125] // Left Win key (KEY_LEFTMETA)
 				if !hasWin {
 					_, hasWin = e.pressedKeys[126] // Right Win key (KEY_RIGHTMETA)
 				}
-				// Get first mouse for transition
-				var firstMouse *DeviceHandle
-				if len(e.mouseDevs) > 0 {
-					firstMouse = e.mouseDevs[0]
-				}
 				e.mu.Unlock()
-				
-				if hasWin && firstMouse != nil {
+
+				if hasWin {
 					log.Println("[evdev] Win+F1 - entering remote mode (Machine 1)")
-					e.Grab(firstMouse)
+					// When switching via keyboard, don't grab any mouse yet
+					// Wait for the first pointer event to determine which mouse to use
+					e.Grab(nil)
 					if e.OnEdgeHit != nil {
 						e.OnEdgeHit()
 					}
 				}
 			}
-			
+
 			if ev.Code == 60 && ev.Value == 1 { // F2 pressed
 				e.mu.Lock()
 				_, hasWin := e.pressedKeys[125] // Left Win key (KEY_LEFTMETA)
 				if !hasWin {
 					_, hasWin = e.pressedKeys[126] // Right Win key (KEY_RIGHTMETA)
 				}
-				// Get first mouse for transition
-				var firstMouse *DeviceHandle
-				if len(e.mouseDevs) > 0 {
-					firstMouse = e.mouseDevs[0]
-				}
 				e.mu.Unlock()
-				
-				if hasWin && firstMouse != nil {
+
+				if hasWin {
 					log.Println("[evdev] Win+F2 - entering remote mode (Machine 2)")
-					e.Grab(firstMouse)
+					// When switching via keyboard, don't grab any mouse yet
+					// Wait for the first pointer event to determine which mouse to use
+					e.Grab(nil)
 					if e.OnEdgeHit != nil {
 						e.OnEdgeHit()
 					}
@@ -719,8 +754,12 @@ func (e *EvdevCapture) handleRemoteMouseEvent(ev InputEvent) {
 		}
 
 	case EV_KEY:
-		if ev.Code >= BTN_LEFT && ev.Code <= BTN_MIDDLE && e.OnButtonEvent != nil {
-			e.OnButtonEvent(ev.Code, ev.Value == 1)
+		// Handle all mouse buttons (1-5): LEFT, RIGHT, MIDDLE, SIDE, EXTRA
+		if e.OnButtonEvent != nil {
+			switch ev.Code {
+			case BTN_LEFT, BTN_RIGHT, BTN_MIDDLE, BTN_SIDE, BTN_EXTRA:
+				e.OnButtonEvent(ev.Code, ev.Value == 1)
+			}
 		}
 	}
 }

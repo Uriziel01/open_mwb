@@ -11,6 +11,8 @@ var VKToLinux = map[int32]uint16{
 	0x01: 0x110, // VK_LBUTTON -> BTN_LEFT
 	0x02: 0x111, // VK_RBUTTON -> BTN_RIGHT
 	0x04: 0x112, // VK_MBUTTON -> BTN_MIDDLE
+	0x05: 0x113, // VK_XBUTTON1 -> BTN_SIDE (Mouse button 4/Back)
+	0x06: 0x114, // VK_XBUTTON2 -> BTN_EXTRA (Mouse button 5/Forward)
 
 	// Common control keys
 	0x08: 14,  // VK_BACK -> KEY_BACKSPACE
@@ -193,6 +195,8 @@ const (
 	WM_RBUTTONUP     = 0x0205
 	WM_MBUTTONDOWN   = 0x0207
 	WM_MBUTTONUP     = 0x0208
+	WM_XBUTTONDOWN   = 0x020B
+	WM_XBUTTONUP     = 0x020C
 	WM_MOUSEWHEEL    = 0x020A
 	WM_KEYDOWN       = 0x0100
 	WM_KEYUP         = 0x0101
