@@ -501,11 +501,16 @@ func receiveLoop(ctx context.Context, client *network.Client, vi *input.VirtualI
 				isRUp := flags == input.WM_RBUTTONUP
 				isMDown := flags == input.WM_MBUTTONDOWN
 				isMUp := flags == input.WM_MBUTTONUP
-				// For X buttons, check the base message type (low 16 bits) and button indicator
+				// For X buttons, check the base message type (low 16 bits) 
+				// The X button number (1 or 2) is in the HIGH word (bits 16-31)
 				isXDown := flags&0xFFFF == input.WM_XBUTTONDOWN
 				isXUp := flags&0xFFFF == input.WM_XBUTTONUP
-				isXButton1 := flags&input.WinMouseMKXButton1 != 0
-				isXButton2 := flags&input.WinMouseMKXButton2 != 0
+				// Extract X button number from high word: 1 = XBUTTON1, 2 = XBUTTON2
+				xButtonNum := uint16((flags >> 16) & 0xFFFF)
+				isXButton1 := isXDown && xButtonNum == 1
+				isXButton2 := isXDown && xButtonNum == 2
+				isXButton1Up := isXUp && xButtonNum == 1
+				isXButton2Up := isXUp && xButtonNum == 2
 				isWheel := flags == input.WM_MOUSEWHEEL
 				isMove := flags == input.WM_MOUSEMOVE
 
@@ -525,14 +530,14 @@ func receiveLoop(ctx context.Context, client *network.Client, vi *input.VirtualI
 				} else if isMUp {
 					middleDown = false
 				}
-				if isXDown && isXButton1 {
+				if isXButton1 {
 					sideDown = true
-				} else if isXUp && isXButton1 {
+				} else if isXButton1Up {
 					sideDown = false
 				}
-				if isXDown && isXButton2 {
+				if isXButton2 {
 					extraDown = true
-				} else if isXUp && isXButton2 {
+				} else if isXButton2Up {
 					extraDown = false
 				}
 
@@ -550,13 +555,13 @@ func receiveLoop(ctx context.Context, client *network.Client, vi *input.VirtualI
 					action = "MIDDLE_DOWN"
 				case isMUp:
 					action = "MIDDLE_UP"
-				case isXDown && isXButton1:
+				case isXButton1:
 					action = "SIDE_DOWN"
-				case isXUp && isXButton1:
+				case isXButton1Up:
 					action = "SIDE_UP"
-				case isXDown && isXButton2:
+				case isXButton2:
 					action = "EXTRA_DOWN"
-				case isXUp && isXButton2:
+				case isXButton2Up:
 					action = "EXTRA_UP"
 				case isWheel:
 					action = fmt.Sprintf("WHEEL(%d)", pkt.Mouse.WheelDelta)

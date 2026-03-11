@@ -305,66 +305,90 @@ func (vi *VirtualInput) updateButtons(flags int32) bool {
 	isRUp := flags == WM_RBUTTONUP
 	isMDown := flags == WM_MBUTTONDOWN
 	isMUp := flags == WM_MBUTTONUP
-	// For X buttons, the flags include MK_XBUTTON1 or MK_XBUTTON2 in high bits
-	// We need to check the base message type and the button indicator
+	// For X buttons, check the base message type (low 16 bits)
+	// The X button number (1 or 2) is in the HIGH word (bits 16-31)
 	isXDown := flags&0xFFFF == WM_XBUTTONDOWN
 	isXUp := flags&0xFFFF == WM_XBUTTONUP
-	isXButton1 := flags&WinMouseMKXButton1 != 0
-	isXButton2 := flags&WinMouseMKXButton2 != 0
+	// Extract X button number from high word: 1 = XBUTTON1, 2 = XBUTTON2
+	xButtonNum := uint16((flags >> 16) & 0xFFFF)
+	isXButton1 := isXDown && xButtonNum == 1
+	isXButton2 := isXDown && xButtonNum == 2
+	isXButton1Up := isXUp && xButtonNum == 1
+	isXButton2Up := isXUp && xButtonNum == 2
 
 	changed := false
 
-	// Handle LEFT button
-	if isLDown && !vi.btnLeft {
-		vi.btnLeft = true
+	// Handle LEFT button - always inject to prevent stuck buttons
+	if isLDown {
+		if !vi.btnLeft {
+			vi.btnLeft = true
+		}
 		writeEvent(vi.mouseFile, EV_KEY, BTN_LEFT, 1)
 		changed = true
-	} else if isLUp && vi.btnLeft {
-		vi.btnLeft = false
+	} else if isLUp {
+		if vi.btnLeft {
+			vi.btnLeft = false
+		}
 		writeEvent(vi.mouseFile, EV_KEY, BTN_LEFT, 0)
 		changed = true
 	}
 
-	// Handle RIGHT button
-	if isRDown && !vi.btnRight {
-		vi.btnRight = true
+	// Handle RIGHT button - always inject to prevent stuck buttons
+	if isRDown {
+		if !vi.btnRight {
+			vi.btnRight = true
+		}
 		writeEvent(vi.mouseFile, EV_KEY, BTN_RIGHT, 1)
 		changed = true
-	} else if isRUp && vi.btnRight {
-		vi.btnRight = false
+	} else if isRUp {
+		if vi.btnRight {
+			vi.btnRight = false
+		}
 		writeEvent(vi.mouseFile, EV_KEY, BTN_RIGHT, 0)
 		changed = true
 	}
 
-	// Handle MIDDLE button
-	if isMDown && !vi.btnMiddle {
-		vi.btnMiddle = true
+	// Handle MIDDLE button - always inject to prevent stuck buttons
+	if isMDown {
+		if !vi.btnMiddle {
+			vi.btnMiddle = true
+		}
 		writeEvent(vi.mouseFile, EV_KEY, BTN_MIDDLE, 1)
 		changed = true
-	} else if isMUp && vi.btnMiddle {
-		vi.btnMiddle = false
+	} else if isMUp {
+		if vi.btnMiddle {
+			vi.btnMiddle = false
+		}
 		writeEvent(vi.mouseFile, EV_KEY, BTN_MIDDLE, 0)
 		changed = true
 	}
 
-	// Handle XBUTTON1 (Side/Back - button 4)
-	if isXDown && isXButton1 && !vi.btnSide {
-		vi.btnSide = true
+	// Handle XBUTTON1 (Side/Back - button 4) - always inject
+	if isXButton1 {
+		if !vi.btnSide {
+			vi.btnSide = true
+		}
 		writeEvent(vi.mouseFile, EV_KEY, BTN_SIDE, 1)
 		changed = true
-	} else if isXUp && isXButton1 && vi.btnSide {
-		vi.btnSide = false
+	} else if isXButton1Up {
+		if vi.btnSide {
+			vi.btnSide = false
+		}
 		writeEvent(vi.mouseFile, EV_KEY, BTN_SIDE, 0)
 		changed = true
 	}
 
-	// Handle XBUTTON2 (Extra/Forward - button 5)
-	if isXDown && isXButton2 && !vi.btnExtra {
-		vi.btnExtra = true
+	// Handle XBUTTON2 (Extra/Forward - button 5) - always inject
+	if isXButton2 {
+		if !vi.btnExtra {
+			vi.btnExtra = true
+		}
 		writeEvent(vi.mouseFile, EV_KEY, BTN_EXTRA, 1)
 		changed = true
-	} else if isXUp && isXButton2 && vi.btnExtra {
-		vi.btnExtra = false
+	} else if isXButton2Up {
+		if vi.btnExtra {
+			vi.btnExtra = false
+		}
 		writeEvent(vi.mouseFile, EV_KEY, BTN_EXTRA, 0)
 		changed = true
 	}
