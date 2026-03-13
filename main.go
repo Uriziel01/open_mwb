@@ -244,6 +244,10 @@ func setupInputCapture(cfg *config.Config, sender *sessionSender) *input.EvdevCa
 
 		log.Printf("Using mouse: %s", mouseDev)
 		log.Printf("Using keyboard: %s", kbdDev)
+
+		if err := evdev.Open(mouseDev, kbdDev); err != nil {
+			log.Fatalf("Failed to open configured input devices: %v", err)
+		}
 	}
 
 	log.Printf("Screen: %dx%d", cfg.ScreenWidth, cfg.ScreenHeight)

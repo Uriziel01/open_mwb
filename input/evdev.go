@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 	"unsafe"
 
 	"golang.org/x/sys/unix"
@@ -46,6 +47,10 @@ func eviocgname(length int) uintptr {
 	return uintptr(2<<30 | uintptr(length)<<16 | 'E'<<8 | 0x06)
 }
 
+func eviocgphys(length int) uintptr {
+	return uintptr(2<<30 | uintptr(length)<<16 | 'E'<<8 | 0x07)
+}
+
 func eviocgbit(ev, length int) uintptr {
 	return uintptr(2<<30) | uintptr(length)<<16 | uintptr('E')<<8 | uintptr(0x20+ev)
 }
@@ -62,6 +67,7 @@ type DeviceCapabilities struct {
 type DeviceInfo struct {
 	Path         string
 	Name         string
+	Phys         string
 	Capabilities DeviceCapabilities
 	IsMouse      bool
 	IsKeyboard   bool
@@ -127,12 +133,10 @@ func classifyDevice(caps DeviceCapabilities) (isMouse, isKeyboard, isTouchpad bo
 	if hasBit(caps.EvBits[:], EV_REL) {
 		hasRelX := hasBit(caps.RelBits[:], REL_X)
 		hasRelY := hasBit(caps.RelBits[:], REL_Y)
-		hasButtons := hasBit(caps.KeyBits[:], BTN_LEFT) ||
-			hasBit(caps.KeyBits[:], BTN_RIGHT) ||
-			hasBit(caps.KeyBits[:], BTN_MIDDLE)
-		hasMouseButton := hasBit(caps.KeyBits[:], BTN_MOUSE)
 
-		if (hasRelX || hasRelY) && (hasButtons || hasMouseButton) {
+		// Some mice expose movement and buttons on separate interfaces.
+		// Accept REL_X/REL_Y movement-only interfaces too.
+		if hasRelX || hasRelY {
 			isMouse = true
 		}
 	}
@@ -228,6 +232,7 @@ func discoverDevices() ([]DeviceInfo, []DeviceInfo, []DeviceInfo, error) {
 			f.Close()
 			continue
 		}
+		phys := devicePhys(f.Fd())
 
 		// Classify device
 		isMouse, isKeyboard, isTouchpad := classifyDevice(caps)
@@ -235,6 +240,7 @@ func discoverDevices() ([]DeviceInfo, []DeviceInfo, []DeviceInfo, error) {
 		info := DeviceInfo{
 			Path:         path,
 			Name:         name,
+			Phys:         phys,
 			Capabilities: caps,
 			IsMouse:      isMouse,
 			IsKeyboard:   isKeyboard,
@@ -243,11 +249,19 @@ func discoverDevices() ([]DeviceInfo, []DeviceInfo, []DeviceInfo, error) {
 
 		if isMouse && !isTouchpad {
 			mice = append(mice, info)
-			log.Printf("[evdev] Found mouse: %s (%s)", path, name)
+			if phys != "" {
+				log.Printf("[evdev] Found mouse: %s (%s) phys=%s", path, name, phys)
+			} else {
+				log.Printf("[evdev] Found mouse: %s (%s)", path, name)
+			}
 		}
 		if isKeyboard {
 			keyboards = append(keyboards, info)
-			log.Printf("[evdev] Found keyboard: %s (%s)", path, name)
+			if phys != "" {
+				log.Printf("[evdev] Found keyboard: %s (%s) phys=%s", path, name, phys)
+			} else {
+				log.Printf("[evdev] Found keyboard: %s (%s)", path, name)
+			}
 		}
 		if isTouchpad {
 			touchpads = append(touchpads, info)
@@ -284,6 +298,10 @@ type EvdevCapture struct {
 	OnButtonEvent  func(code uint16, pressed bool)
 	OnEmergency    func() // Called when PAUSE is pressed (emergency kill switch)
 	pressedKeys    map[uint16]bool
+	pendingMouse   *DeviceHandle
+	pendingHits    int
+	pendingMotion  int
+	pendingUntil   time.Time
 }
 
 type mouseActivationAction int
@@ -302,6 +320,100 @@ func NewEvdevCapture(screenW, screenH int) *EvdevCapture {
 		cursorY:     screenH / 2,
 		pressedKeys: make(map[uint16]bool),
 	}
+}
+
+const (
+	mouseIntentWindow             = 150 * time.Millisecond
+	mouseIntentMinMotionMagnitude = 4
+)
+
+func deviceName(fd uintptr, fallback string) string {
+	nameBuf := make([]byte, 256)
+	_, _, errno := unix.Syscall(unix.SYS_IOCTL, fd, eviocgname(len(nameBuf)),
+		uintptr(unsafe.Pointer(&nameBuf[0])))
+	if errno != 0 {
+		return fallback
+	}
+	name := strings.TrimRight(string(nameBuf), "\x00")
+	if name == "" {
+		return fallback
+	}
+	return name
+}
+
+func devicePhys(fd uintptr) string {
+	physBuf := make([]byte, 256)
+	_, _, errno := unix.Syscall(unix.SYS_IOCTL, fd, eviocgphys(len(physBuf)),
+		uintptr(unsafe.Pointer(&physBuf[0])))
+	if errno != 0 {
+		return ""
+	}
+	return strings.TrimRight(string(physBuf), "\x00")
+}
+
+func normalizeDeviceName(name string) string {
+	return strings.ToLower(strings.TrimSpace(name))
+}
+
+func normalizeDevicePhys(phys string) string {
+	phys = strings.TrimSpace(phys)
+	if phys == "" {
+		return ""
+	}
+	if idx := strings.LastIndex(phys, "/input"); idx != -1 {
+		suffix := phys[idx+len("/input"):]
+		allDigits := suffix != ""
+		for _, r := range suffix {
+			if r < '0' || r > '9' {
+				allDigits = false
+				break
+			}
+		}
+		if allDigits {
+			phys = phys[:idx]
+		}
+	}
+	return strings.ToLower(phys)
+}
+
+// Open opens explicit input device paths for mouse and keyboard.
+func (e *EvdevCapture) Open(mousePath, kbdPath string) error {
+	mouseFile, err := os.OpenFile(mousePath, os.O_RDONLY, 0)
+	if err != nil {
+		return fmt.Errorf("open mouse %s: %w", mousePath, err)
+	}
+
+	kbdFile, err := os.OpenFile(kbdPath, os.O_RDONLY, 0)
+	if err != nil {
+		mouseFile.Close()
+		return fmt.Errorf("open keyboard %s: %w", kbdPath, err)
+	}
+
+	e.mouseDevs = []*DeviceHandle{
+		{
+			File: mouseFile,
+			Info: DeviceInfo{
+				Path: mousePath,
+				Name: deviceName(mouseFile.Fd(), filepath.Base(mousePath)),
+				Phys: devicePhys(mouseFile.Fd()),
+			},
+		},
+	}
+	e.kbdDevs = []*DeviceHandle{
+		{
+			File: kbdFile,
+			Info: DeviceInfo{
+				Path: kbdPath,
+				Name: deviceName(kbdFile.Fd(), filepath.Base(kbdPath)),
+				Phys: devicePhys(kbdFile.Fd()),
+			},
+		},
+	}
+
+	log.Printf("[evdev] Using configured mouse: %s (%s)", mousePath, e.mouseDevs[0].Info.Name)
+	log.Printf("[evdev] Using configured keyboard: %s (%s)", kbdPath, e.kbdDevs[0].Info.Name)
+
+	return nil
 }
 
 func (e *EvdevCapture) DiscoverAndOpen() error {
@@ -443,11 +555,17 @@ func (e *EvdevCapture) Grab(activeMouse *DeviceHandle) error {
 	} else if activeMouse == nil {
 		// When switching via keyboard, don't grab any mouse yet
 		// The mouse loop will grab the first intentional REL movement/button event.
+		e.resetPendingMouseLocked()
 		log.Printf("[evdev] Switching via keyboard - waiting for intentional REL mouse input to select active mouse")
 	}
 
 	// Grab keyboard for remote typing
 	for _, dev := range e.kbdDevs {
+		if e.isMouseDevicePathLocked(dev.Info.Path) {
+			log.Printf("[evdev] Skipping keyboard grab for combo mouse device: %s (%s)", dev.Info.Name, dev.Info.Path)
+			continue
+		}
+
 		if !dev.Grabbed {
 			_, _, errno := unix.Syscall(unix.SYS_IOCTL, dev.File.Fd(), EVIOCGRAB, 1)
 			if errno != 0 {
@@ -470,6 +588,56 @@ func (e *EvdevCapture) Grab(activeMouse *DeviceHandle) error {
 
 	log.Println("[evdev] Remote mode active - other mice remain free for local control")
 	return nil
+}
+
+func (e *EvdevCapture) isMouseDevicePathLocked(path string) bool {
+	for _, dev := range e.mouseDevs {
+		if dev.Info.Path == path {
+			return true
+		}
+	}
+	return false
+}
+
+func isSamePhysicalDevice(a, b DeviceInfo) bool {
+	physA := normalizeDevicePhys(a.Phys)
+	physB := normalizeDevicePhys(b.Phys)
+	if physA != "" && physA == physB {
+		return true
+	}
+
+	nameA := normalizeDeviceName(a.Name)
+	nameB := normalizeDeviceName(b.Name)
+	return nameA != "" && nameA == nameB
+}
+
+func (e *EvdevCapture) mouseSourceForKeyboardButtonLocked(kbd *DeviceHandle) *DeviceHandle {
+	// If this exact path is already in mouseDevs, mouse loop handles these events.
+	if e.isMouseDevicePathLocked(kbd.Info.Path) {
+		return nil
+	}
+
+	var matches []*DeviceHandle
+	for _, mouse := range e.mouseDevs {
+		if isSamePhysicalDevice(kbd.Info, mouse.Info) {
+			matches = append(matches, mouse)
+		}
+	}
+
+	switch len(matches) {
+	case 0:
+		return nil
+	case 1:
+		return matches[0]
+	default:
+		// If the active mouse is one of the candidates, preserve it.
+		for _, mouse := range matches {
+			if mouse == e.activeMouseDev {
+				return mouse
+			}
+		}
+		return matches[0]
+	}
 }
 
 func (e *EvdevCapture) Ungrab() error {
@@ -495,6 +663,7 @@ func (e *EvdevCapture) Ungrab() error {
 	e.IsRemote = false
 	e.activeMouseDev = nil
 	e.activeKbdDev = nil
+	e.resetPendingMouseLocked()
 	// Reset cursor to center
 	e.cursorX = e.screenW / 2
 	e.cursorY = e.screenH / 2
@@ -528,7 +697,7 @@ func (e *EvdevCapture) runSingleMouseLoop(dev *DeviceHandle) {
 		e.mu.Lock()
 		isRemote := e.IsRemote
 		if isRemote {
-			switch remoteMouseActivationAction(e.activeMouseDev, dev, ev) {
+			switch e.decideMouseActivationLocked(dev, ev) {
 			case mouseActionActivate:
 				e.grabMouseLocked(dev, "initial activation")
 			case mouseActionRebind:
@@ -538,6 +707,10 @@ func (e *EvdevCapture) runSingleMouseLoop(dev *DeviceHandle) {
 		}
 		activeMouse := e.activeMouseDev
 		e.mu.Unlock()
+
+		if ev.Type == EV_KEY && isMouseButtonCode(ev.Code) {
+			logMouseButtonCapture(dev, ev, isRemote, activeMouse)
+		}
 
 		if isRemote {
 			// In remote mode, only process events from the active mouse
@@ -550,13 +723,124 @@ func (e *EvdevCapture) runSingleMouseLoop(dev *DeviceHandle) {
 	}
 }
 
-func isMouseButtonCode(code uint16) bool {
-	switch code {
-	case BTN_LEFT, BTN_RIGHT, BTN_MIDDLE, BTN_SIDE, BTN_EXTRA:
-		return true
-	default:
-		return false
+func isMouseButtonPress(ev InputEvent) bool {
+	return ev.Type == EV_KEY && ev.Value == 1 && isMouseButtonCode(ev.Code)
+}
+
+func (e *EvdevCapture) resetPendingMouseLocked() {
+	e.pendingMouse = nil
+	e.pendingHits = 0
+	e.pendingMotion = 0
+	e.pendingUntil = time.Time{}
+}
+
+func absInt(v int32) int {
+	if v < 0 {
+		return int(-v)
 	}
+	return int(v)
+}
+
+func (e *EvdevCapture) registerPendingMouseLocked(source *DeviceHandle, ev InputEvent) {
+	now := time.Now()
+	if e.pendingMouse != source || now.After(e.pendingUntil) {
+		e.pendingMouse = source
+		e.pendingHits = 1
+		e.pendingMotion = absInt(ev.Value)
+		e.pendingUntil = now.Add(mouseIntentWindow)
+		log.Printf("[evdev] Mouse candidate observed: %s", source.Info.Name)
+		return
+	}
+
+	e.pendingHits++
+	e.pendingMotion += absInt(ev.Value)
+	e.pendingUntil = now.Add(mouseIntentWindow)
+}
+
+func (e *EvdevCapture) decideMouseActivationLocked(source *DeviceHandle, ev InputEvent) mouseActivationAction {
+	base := remoteMouseActivationAction(e.activeMouseDev, source, ev)
+	if base == mouseActionNone {
+		if !time.Now().Before(e.pendingUntil) {
+			e.resetPendingMouseLocked()
+		}
+		return mouseActionNone
+	}
+
+	if isMouseButtonPress(ev) {
+		e.resetPendingMouseLocked()
+		return base
+	}
+
+	// Require two consecutive intentional motion events from the same device
+	// to avoid accidental activation/rebind from a single noisy packet.
+	e.registerPendingMouseLocked(source, ev)
+	if e.pendingHits < 2 || e.pendingMotion < mouseIntentMinMotionMagnitude {
+		return mouseActionNone
+	}
+
+	e.resetPendingMouseLocked()
+	return base
+}
+
+func isMouseButtonCode(code uint16) bool {
+	return code >= BTN_MOUSE && code <= BTN_MOUSE+0x0f
+}
+
+func mouseButtonName(code uint16) string {
+	switch code {
+	case BTN_LEFT:
+		return "LEFT"
+	case BTN_RIGHT:
+		return "RIGHT"
+	case BTN_MIDDLE:
+		return "MIDDLE"
+	case BTN_SIDE:
+		return "SIDE"
+	case BTN_EXTRA:
+		return "EXTRA"
+	default:
+		return fmt.Sprintf("BTN_%d", code)
+	}
+}
+
+func mouseButtonAction(value int32) string {
+	switch value {
+	case 1:
+		return "DOWN"
+	case 0:
+		return "UP"
+	case 2:
+		return "REPEAT"
+	default:
+		return fmt.Sprintf("VALUE_%d", value)
+	}
+}
+
+func logMouseButtonCapture(dev *DeviceHandle, ev InputEvent, isRemote bool, activeMouse *DeviceHandle) {
+	route := "LOCAL_ONLY"
+	switch {
+	case isRemote && activeMouse == nil:
+		route = "REMOTE_WAITING_ACTIVE_MOUSE"
+	case isRemote && dev == activeMouse:
+		route = "REMOTE_FORWARDED"
+	case isRemote && dev != activeMouse:
+		route = "REMOTE_IGNORED_INACTIVE_MOUSE"
+	}
+
+	log.Printf("[LOCAL-MOUSE] %s %s | Device=%s (%s) | Route=%s",
+		mouseButtonName(ev.Code), mouseButtonAction(ev.Value), dev.Info.Name, dev.Info.Path, route)
+}
+
+func logMouseButtonCaptureKeyboardPath(dev *DeviceHandle, ev InputEvent, route string, sourceMouse *DeviceHandle) {
+	if sourceMouse != nil {
+		log.Printf("[LOCAL-MOUSE] %s %s | Device=%s (%s) | Route=%s | MappedMouse=%s (%s)",
+			mouseButtonName(ev.Code), mouseButtonAction(ev.Value), dev.Info.Name, dev.Info.Path, route,
+			sourceMouse.Info.Name, sourceMouse.Info.Path)
+		return
+	}
+
+	log.Printf("[LOCAL-MOUSE] %s %s | Device=%s (%s) | Route=%s",
+		mouseButtonName(ev.Code), mouseButtonAction(ev.Value), dev.Info.Name, dev.Info.Path, route)
 }
 
 func isIntentionalRemoteMouseEvent(ev InputEvent) bool {
@@ -647,6 +931,45 @@ func (e *EvdevCapture) runSingleKeyboardLoop(dev *DeviceHandle) {
 		// Skip auto-repeat events (ev.Value == 2) to prevent keys from getting stuck
 		// Only process actual key press (1) and key release (0) events
 		if ev.Value == 2 {
+			continue
+		}
+
+		// Some combined HID receivers expose mouse buttons on keyboard-like devices.
+		// Keep these out of keyboard forwarding and map them back to the matching mouse.
+		if isMouseButtonCode(ev.Code) {
+			pressed := ev.Value == 1
+			route := "LOCAL_KEYBOARD_PATH"
+			var sourceMouse *DeviceHandle
+			shouldForward := false
+
+			e.mu.Lock()
+			if e.IsRemote {
+				sourceMouse = e.mouseSourceForKeyboardButtonLocked(dev)
+				if sourceMouse == nil {
+					route = "REMOTE_KEYBOARD_PATH_FILTERED"
+				} else {
+					switch e.decideMouseActivationLocked(sourceMouse, ev) {
+					case mouseActionActivate:
+						e.grabMouseLocked(sourceMouse, "keyboard-path mouse button")
+					case mouseActionRebind:
+						e.ungrabMouseLocked(e.activeMouseDev, "keyboard-path adaptive rebind")
+						e.grabMouseLocked(sourceMouse, "keyboard-path adaptive rebind")
+					}
+
+					if e.activeMouseDev == sourceMouse {
+						route = "REMOTE_FORWARDED_KEYBOARD_COMBO"
+						shouldForward = true
+					} else {
+						route = "REMOTE_IGNORED_INACTIVE_MOUSE"
+					}
+				}
+			}
+			e.mu.Unlock()
+
+			if shouldForward && e.OnButtonEvent != nil {
+				e.OnButtonEvent(ev.Code, pressed)
+			}
+			logMouseButtonCaptureKeyboardPath(dev, ev, route, sourceMouse)
 			continue
 		}
 		pressed := ev.Value == 1
