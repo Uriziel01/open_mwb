@@ -71,6 +71,7 @@ Create a `config.json` next to the binary (or in the working directory):
   "port":   15100,
   "id":     2,
   "name":   "[THIS_MACHINE_NAME]",
+  "mouse_sensitivity": 24,
   "edge":   "right",
   "mode":   "client"
 }
@@ -83,6 +84,7 @@ Create a `config.json` next to the binary (or in the working directory):
 | `port`   | MWB listen port (default `15100`)                                   |
 | `id`     | A unique integer ID for **this** machine (pick any non-zero value)  |
 | `name`   | This machine's hostname (auto-detected from `hostname` if omitted)  |
+| `mouse_sensitivity` | Linux→Windows mouse scale factor (default `24`, lower is slower) |
 | `edge`   | Which screen edge is adjacent to Windows: `left`, `right`, `top`, `bottom` |
 | `mode`   | `client` (full input forwarding) or `tui` (debug terminal UI)       |
 

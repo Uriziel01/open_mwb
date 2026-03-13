@@ -17,32 +17,33 @@ import (
 // Config holds the runtime configuration for MWB Linux.
 type Config struct {
 	// Network
-	SecurityKey      string `json:"key"`
-	RemoteAddress    string `json:"remote"`
-	ListenPort       int    `json:"port"`
-	MachineID        uint32 `json:"id"`
-	RemoteMachineID  uint32 `json:"remote_id"`
-	MachineName      string `json:"name"`
+	SecurityKey     string `json:"key"`
+	RemoteAddress   string `json:"remote"`
+	ListenPort      int    `json:"port"`
+	MachineID       uint32 `json:"id"`
+	RemoteMachineID uint32 `json:"remote_id"`
+	MachineName     string `json:"name"`
 
 	// Screen
-	ScreenWidth    int    `json:"width"`
-	ScreenHeight   int    `json:"height"`
+	ScreenWidth      int `json:"width"`
+	ScreenHeight     int `json:"height"`
+	MouseSensitivity int `json:"mouse_sensitivity"`
 
 	// Input device paths (auto-detected if empty)
 	MouseDevice    string `json:"mouse"`
 	KeyboardDevice string `json:"keyboard"`
 
 	// Mode
-	Mode           string `json:"mode"`
+	Mode string `json:"mode"`
 
 	// Debug
-	Debug          bool   `json:"debug"`
+	Debug bool `json:"debug"`
 
 	// CLI-only, not in JSON
-	ListDevices    bool   `json:"-"`
-	ConfigFile     string `json:"-"`
-	ShowVersion    bool   `json:"-"`
-	Demo           bool   `json:"-"`
+	ListDevices bool   `json:"-"`
+	ConfigFile  string `json:"-"`
+	ShowVersion bool   `json:"-"`
+	Demo        bool   `json:"-"`
 }
 
 // defaultConfigPaths returns paths to search for config.json, in priority order.
@@ -104,19 +105,21 @@ func (c *Config) saveToJSON() error {
 
 	// Use a minimal struct — mirrors config.example.json
 	slim := struct {
-		Key    string `json:"key"`
-		Remote string `json:"remote"`
-		Mode   string `json:"mode"`
-		ID     uint32 `json:"id"`
-		Name   string `json:"name"`
-		Debug  bool   `json:"debug"`
+		Key              string `json:"key"`
+		Remote           string `json:"remote"`
+		MouseSensitivity int    `json:"mouse_sensitivity"`
+		Mode             string `json:"mode"`
+		ID               uint32 `json:"id"`
+		Name             string `json:"name"`
+		Debug            bool   `json:"debug"`
 	}{
-		Key:    c.SecurityKey,
-		Remote: c.RemoteAddress,
-		Mode:   c.Mode,
-		ID:     c.MachineID,
-		Name:   c.MachineName,
-		Debug:  false,
+		Key:              c.SecurityKey,
+		Remote:           c.RemoteAddress,
+		MouseSensitivity: c.MouseSensitivity,
+		Mode:             c.Mode,
+		ID:               c.MachineID,
+		Name:             c.MachineName,
+		Debug:            false,
 	}
 
 	data, err := json.MarshalIndent(slim, "", "    ")
@@ -249,27 +252,29 @@ func (c *Config) runOnboarding() {
 func Parse() *Config {
 	c := &Config{
 		// Defaults
-		ListenPort:   15100,
-		MachineID:    1,
-		ScreenWidth:  1920,
-		ScreenHeight: 1080,
-		Mode:         "client",
+		ListenPort:       15100,
+		MachineID:        1,
+		ScreenWidth:      1920,
+		ScreenHeight:     1080,
+		MouseSensitivity: 24,
+		Mode:             "client",
 	}
 
 	// Define flags (all optional since JSON provides defaults)
 	var (
-		flagKey      = flag.String("key", "", "MWB security key (must match Windows)")
-		flagRemote   = flag.String("remote", "", "Remote Windows machine IP/hostname")
-		flagPort     = flag.Int("port", 0, "TCP listen port")
-		flagID       = flag.Uint("id", 0, "This machine's MWB ID (from MachinePool)")
-		flagRemoteID = flag.Uint("remote-id", 0, "Remote machine's MWB ID (from MachinePool)")
-		flagWidth    = flag.Int("width", 0, "Local screen width in pixels")
-		flagHeight   = flag.Int("height", 0, "Local screen height in pixels")
-		flagMouse    = flag.String("mouse", "", "Mouse /dev/input/event path (auto-detect if empty)")
-		flagKeyboard = flag.String("keyboard", "", "Keyboard /dev/input/event path (auto-detect if empty)")
-		flagMode     = flag.String("mode", "", "Run mode: client, server, or tui")
-		flagConfig   = flag.String("config", "", "Path to config.json (auto-detected if empty)")
-		flagDebug    = flag.Bool("debug", false, "Enable debug packet logging")
+		flagKey       = flag.String("key", "", "MWB security key (must match Windows)")
+		flagRemote    = flag.String("remote", "", "Remote Windows machine IP/hostname")
+		flagPort      = flag.Int("port", 0, "TCP listen port")
+		flagID        = flag.Uint("id", 0, "This machine's MWB ID (from MachinePool)")
+		flagRemoteID  = flag.Uint("remote-id", 0, "Remote machine's MWB ID (from MachinePool)")
+		flagWidth     = flag.Int("width", 0, "Local screen width in pixels")
+		flagHeight    = flag.Int("height", 0, "Local screen height in pixels")
+		flagMouse     = flag.String("mouse", "", "Mouse /dev/input/event path (auto-detect if empty)")
+		flagKeyboard  = flag.String("keyboard", "", "Keyboard /dev/input/event path (auto-detect if empty)")
+		flagMode      = flag.String("mode", "", "Run mode: client, server, or tui")
+		flagConfig    = flag.String("config", "", "Path to config.json (auto-detected if empty)")
+		flagDebug     = flag.Bool("debug", false, "Enable debug packet logging")
+		flagMouseSens = flag.Int("mouse-sensitivity", 0, "Remote mouse movement scale (higher = faster)")
 	)
 	flag.BoolVar(&c.ListDevices, "list-devices", false, "List all /dev/input devices and exit")
 	flag.BoolVar(&c.ShowVersion, "version", false, "Print version and exit")
@@ -310,6 +315,8 @@ func Parse() *Config {
 			c.Mode = *flagMode
 		case "debug":
 			c.Debug = *flagDebug
+		case "mouse-sensitivity":
+			c.MouseSensitivity = *flagMouseSens
 		}
 	})
 
@@ -341,6 +348,10 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("machine id is required (set in config.json or use --id)")
 	}
 
+	if c.MouseSensitivity <= 0 {
+		return fmt.Errorf("mouse_sensitivity must be > 0 (set in config.json or use --mouse-sensitivity)")
+	}
+
 	return nil
 }
 
@@ -358,6 +369,7 @@ config.json example:
   {
     "key": "YourSecurityKey",
     "remote": "192.168.1.100",
+    "mouse_sensitivity": 24,
     "mode": "client",
     "id": 1001
   }

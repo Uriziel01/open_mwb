@@ -250,7 +250,7 @@ func setupInputCapture(cfg *config.Config, sender *sessionSender) *input.EvdevCa
 		}
 	}
 
-	log.Printf("Screen: %dx%d", cfg.ScreenWidth, cfg.ScreenHeight)
+	log.Printf("Screen: %dx%d | Mouse sensitivity: %d", cfg.ScreenWidth, cfg.ScreenHeight, cfg.MouseSensitivity)
 
 	cursorX, cursorY := int32(32768), int32(32768)
 
@@ -270,8 +270,8 @@ func setupInputCapture(cfg *config.Config, sender *sessionSender) *input.EvdevCa
 
 	evdev.OnMouseEvent = func(dx, dy, wheel int) {
 		if wheel == 0 {
-			cursorX += int32(dx * 40)
-			cursorY += int32(dy * 40)
+			cursorX += int32(dx * cfg.MouseSensitivity)
+			cursorY += int32(dy * cfg.MouseSensitivity)
 			cursorX = clamp(cursorX, 0, 65535)
 			cursorY = clamp(cursorY, 0, 65535)
 		}
