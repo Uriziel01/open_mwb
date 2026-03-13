@@ -1131,6 +1131,12 @@ func (e *EvdevCapture) handleRemoteMouseEvent(ev InputEvent) {
 		}
 
 	case EV_KEY:
+		// Ignore hold/repeat values to avoid false button-up during drag.
+		// Valid button states are press=1 and release=0.
+		if ev.Value != 0 && ev.Value != 1 {
+			return
+		}
+
 		// Handle all mouse buttons (1-5): LEFT, RIGHT, MIDDLE, SIDE, EXTRA
 		if e.OnButtonEvent != nil {
 			switch ev.Code {
