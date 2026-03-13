@@ -7,6 +7,7 @@ import (
 	"io"
 	"log"
 	"net"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -23,6 +24,7 @@ type Client struct {
 	Debug           bool
 	MachineName     string
 	connected       atomic.Bool
+	sendMu          sync.Mutex
 }
 
 func (c *Client) IsConnected() bool {
@@ -221,11 +223,25 @@ func (c *Client) Send(data *protocol.GenericData) error {
 		return err
 	}
 
+	c.sendMu.Lock()
+	defer c.sendMu.Unlock()
+
 	encrypted := c.Cipher.Encrypt(plainBytes)
-	_, err = c.Conn.Write(encrypted)
+	err = writeAll(c.Conn, encrypted)
 	if err != nil {
 		c.markDisconnected()
 		return err
+	}
+	return nil
+}
+
+func writeAll(conn net.Conn, data []byte) error {
+	for len(data) > 0 {
+		n, err := conn.Write(data)
+		if err != nil {
+			return err
+		}
+		data = data[n:]
 	}
 	return nil
 }

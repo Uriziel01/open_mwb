@@ -159,32 +159,32 @@ func classifyDevice(caps DeviceCapabilities) (isMouse, isKeyboard, isTouchpad bo
 		// Key codes: KEY_1=2 to KEY_0=11 (numbers), KEY_A=30 to KEY_Z=45 (letters)
 		// KEY_F1=59 to KEY_F12=70, KEY_SPACE=57, KEY_ENTER=28
 		typingKeys := 0
-		
+
 		// Check for letters A-Z (codes 30-45)
 		for i := 30; i <= 45; i++ {
 			if hasBit(caps.KeyBits[:], i) {
 				typingKeys++
 			}
 		}
-		
+
 		// Check for numbers 1-0 (codes 2-11)
 		for i := 2; i <= 11; i++ {
 			if hasBit(caps.KeyBits[:], i) {
 				typingKeys++
 			}
 		}
-		
+
 		// Check for function keys F1-F12 (codes 59-70)
 		for i := 59; i <= 70; i++ {
 			if hasBit(caps.KeyBits[:], i) {
 				typingKeys++
 			}
 		}
-		
+
 		// Also check for essential keys
 		hasSpace := hasBit(caps.KeyBits[:], 57)
 		hasEnter := hasBit(caps.KeyBits[:], 28)
-		
+
 		// Must have substantial typing capability
 		// Require at least 15 typing keys (roughly half of A-Z) plus essential keys
 		if typingKeys >= 15 && hasSpace && hasEnter {
@@ -286,6 +286,14 @@ type EvdevCapture struct {
 	pressedKeys    map[uint16]bool
 }
 
+type mouseActivationAction int
+
+const (
+	mouseActionNone mouseActivationAction = iota
+	mouseActionActivate
+	mouseActionRebind
+)
+
 func NewEvdevCapture(screenW, screenH int) *EvdevCapture {
 	return &EvdevCapture{
 		screenW:     screenW,
@@ -297,15 +305,9 @@ func NewEvdevCapture(screenW, screenH int) *EvdevCapture {
 }
 
 func (e *EvdevCapture) DiscoverAndOpen() error {
-	mice, keyboards, touchpads, err := discoverDevices()
+	mice, keyboards, _, err := discoverDevices()
 	if err != nil {
 		return err
-	}
-
-	// Use touchpads as mice if no dedicated mice found
-	if len(mice) == 0 && len(touchpads) > 0 {
-		mice = touchpads
-		log.Printf("[evdev] Using %d touchpad(s) as mouse input", len(touchpads))
 	}
 
 	if len(mice) == 0 {
@@ -440,8 +442,8 @@ func (e *EvdevCapture) Grab(activeMouse *DeviceHandle) error {
 		}
 	} else if activeMouse == nil {
 		// When switching via keyboard, don't grab any mouse yet
-		// The mouse loop will grab the first device that sends a pointer event
-		log.Printf("[evdev] Switching via keyboard - waiting for first pointer event to grab mouse")
+		// The mouse loop will grab the first intentional REL movement/button event.
+		log.Printf("[evdev] Switching via keyboard - waiting for intentional REL mouse input to select active mouse")
 	}
 
 	// Grab keyboard for remote typing
@@ -525,31 +527,16 @@ func (e *EvdevCapture) runSingleMouseLoop(dev *DeviceHandle) {
 
 		e.mu.Lock()
 		isRemote := e.IsRemote
-		activeMouse := e.activeMouseDev
-
 		if isRemote {
-			// In remote mode, check if we need to set active mouse
-			// This happens when switching via keyboard shortcut (activeMouse is nil)
-			if activeMouse == nil {
-				// Check if this is a pointer movement event (relative or absolute)
-				if ev.Type == EV_REL || ev.Type == EV_ABS {
-					// First pointer event received - grab this device
-					// Double-check still in remote mode and no active mouse set
-					if e.IsRemote && e.activeMouseDev == nil {
-						e.activeMouseDev = dev
-						activeMouse = dev
-						// Grab this mouse device
-						_, _, errno := unix.Syscall(unix.SYS_IOCTL, dev.File.Fd(), EVIOCGRAB, 1)
-						if errno != 0 {
-							log.Printf("[evdev] Warning: failed to grab mouse %s: %v", dev.Info.Path, errno)
-						} else {
-							dev.Grabbed = true
-							log.Printf("[evdev] Grabbed mouse from pointer event: %s", dev.Info.Name)
-						}
-					}
-				}
+			switch remoteMouseActivationAction(e.activeMouseDev, dev, ev) {
+			case mouseActionActivate:
+				e.grabMouseLocked(dev, "initial activation")
+			case mouseActionRebind:
+				e.ungrabMouseLocked(e.activeMouseDev, "adaptive rebind")
+				e.grabMouseLocked(dev, "adaptive rebind")
 			}
 		}
+		activeMouse := e.activeMouseDev
 		e.mu.Unlock()
 
 		if isRemote {
@@ -561,6 +548,73 @@ func (e *EvdevCapture) runSingleMouseLoop(dev *DeviceHandle) {
 			e.handleLocalMouseEvent(ev, dev)
 		}
 	}
+}
+
+func isMouseButtonCode(code uint16) bool {
+	switch code {
+	case BTN_LEFT, BTN_RIGHT, BTN_MIDDLE, BTN_SIDE, BTN_EXTRA:
+		return true
+	default:
+		return false
+	}
+}
+
+func isIntentionalRemoteMouseEvent(ev InputEvent) bool {
+	// REL-only selection policy: ignore EV_ABS devices for activation/rebind.
+	if ev.Type == EV_REL {
+		switch ev.Code {
+		case REL_X, REL_Y:
+			return ev.Value != 0
+		}
+		return false
+	}
+
+	// Treat mouse button presses as intentional selection/rebind input.
+	if ev.Type == EV_KEY && ev.Value == 1 && isMouseButtonCode(ev.Code) {
+		return true
+	}
+
+	return false
+}
+
+func remoteMouseActivationAction(active, source *DeviceHandle, ev InputEvent) mouseActivationAction {
+	if !isIntentionalRemoteMouseEvent(ev) {
+		return mouseActionNone
+	}
+	if active == nil {
+		return mouseActionActivate
+	}
+	if active != source {
+		return mouseActionRebind
+	}
+	return mouseActionNone
+}
+
+func (e *EvdevCapture) ungrabMouseLocked(dev *DeviceHandle, reason string) {
+	if dev == nil || !dev.Grabbed {
+		return
+	}
+	unix.Syscall(unix.SYS_IOCTL, dev.File.Fd(), EVIOCGRAB, 0)
+	dev.Grabbed = false
+	log.Printf("[evdev] Released active mouse (%s): %s", reason, dev.Info.Name)
+}
+
+func (e *EvdevCapture) grabMouseLocked(dev *DeviceHandle, reason string) {
+	if dev == nil {
+		return
+	}
+
+	e.activeMouseDev = dev
+	if !dev.Grabbed {
+		_, _, errno := unix.Syscall(unix.SYS_IOCTL, dev.File.Fd(), EVIOCGRAB, 1)
+		if errno != 0 {
+			log.Printf("[evdev] Warning: failed to grab mouse %s during %s: %v", dev.Info.Path, reason, errno)
+		} else {
+			dev.Grabbed = true
+		}
+	}
+
+	log.Printf("[evdev] Active mouse selected (%s): %s (%s)", reason, dev.Info.Name, dev.Info.Path)
 }
 
 func (e *EvdevCapture) RunKeyboardLoop() {
@@ -806,7 +860,7 @@ func applyAcceleration(val int) int {
 	if absVal < 0 {
 		absVal = -absVal
 	}
-	
+
 	// Fast movement: increase speed significantly
 	if absVal > 15 {
 		return val * 3

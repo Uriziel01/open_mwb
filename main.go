@@ -10,7 +10,6 @@ import (
 	"os"
 	"os/signal"
 	"strings"
-	"sync"
 	"syscall"
 	"time"
 
@@ -79,14 +78,14 @@ func main() {
 
 		// Create cancellation context for this connection
 		ctx, cancel := context.WithCancel(context.Background())
-		
+
 		// Run the main session
 		disconnectCh := runSession(ctx, cfg, client)
 
 		// Wait for either disconnection or interrupt signal
 		sigCh := make(chan os.Signal, 1)
 		signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
-		
+
 		select {
 		case <-sigCh:
 			// User interrupted - clean shutdown
@@ -109,25 +108,26 @@ func main() {
 	}
 }
 
-// runSession starts all goroutines for a connected session and returns a channel 
+// runSession starts all goroutines for a connected session and returns a channel
 // that signals when the connection is lost
 func runSession(ctx context.Context, cfg *config.Config, client *network.Client) <-chan struct{} {
 	disconnectCh := make(chan struct{})
+	sender := newSessionSender(client, cfg.MachineID, client.RemoteMachineID)
 
 	vi, err := input.NewVirtualInput(cfg.ScreenWidth, cfg.ScreenHeight)
 	if err != nil {
 		log.Fatalf("Failed to create virtual input: %v", err)
 	}
 
-	evdev := setupInputCapture(cfg, client)
+	evdev := setupInputCapture(cfg, sender)
 
 	clip := clipboard.New()
-	setupClipboard(clip, client, cfg)
+	setupClipboard(clip, sender)
 
 	go evdev.RunMouseLoop()
 	go evdev.RunKeyboardLoop()
 	go clip.Watch()
-	go sendHeartbeats(ctx, client, cfg)
+	go sendHeartbeats(ctx, sender)
 	go receiveLoop(ctx, client, vi, clip, evdev, cfg.Debug, disconnectCh)
 
 	log.Println("")
@@ -213,7 +213,7 @@ func runBackgroundServer(server *network.Server) {
 	}
 }
 
-func setupInputCapture(cfg *config.Config, client *network.Client) *input.EvdevCapture {
+func setupInputCapture(cfg *config.Config, sender *sessionSender) *input.EvdevCapture {
 	evdev := input.NewEvdevCapture(cfg.ScreenWidth, cfg.ScreenHeight)
 
 	// Use auto-discovery by default (recommended - works with all hardware)
@@ -248,15 +248,6 @@ func setupInputCapture(cfg *config.Config, client *network.Client) *input.EvdevC
 
 	log.Printf("Screen: %dx%d", cfg.ScreenWidth, cfg.ScreenHeight)
 
-	var sendMu sync.Mutex
-	packetID := uint32(100)
-	nextID := func() uint32 {
-		sendMu.Lock()
-		defer sendMu.Unlock()
-		packetID++
-		return packetID
-	}
-
 	cursorX, cursorY := int32(32768), int32(32768)
 
 	evdev.OnEdgeHit = func() {
@@ -268,7 +259,7 @@ func setupInputCapture(cfg *config.Config, client *network.Client) *input.EvdevC
 	}
 
 	evdev.OnEmergency = func() {
-				log.Println("[EMERGENCY] PAUSE key detected - releasing all devices and exiting!")
+		log.Println("[EMERGENCY] PAUSE key detected - releasing all devices and exiting!")
 		evdev.Close()
 		os.Exit(1)
 	}
@@ -286,17 +277,20 @@ func setupInputCapture(cfg *config.Config, client *network.Client) *input.EvdevC
 			flags = input.WM_MOUSEWHEEL
 		}
 
-		sendPacket(client, nextID(), cfg.MachineID, client.RemoteMachineID, protocol.Mouse, sendMu,
-			&protocol.MouseData{X: cursorX, Y: cursorY, WheelDelta: int32(wheel), Flags: int32(flags)})
+		sender.Send(protocol.Mouse, &protocol.MouseData{X: cursorX, Y: cursorY, WheelDelta: int32(wheel), Flags: int32(flags)})
 	}
 
 	evdev.OnButtonEvent = func(code uint16, pressed bool) {
-		flags := buttonFlags(code, pressed)
+		flags, xButton := buttonPacket(code, pressed)
 		if flags == 0 {
 			return
 		}
-		sendPacket(client, nextID(), cfg.MachineID, client.RemoteMachineID, protocol.Mouse, sendMu,
-			&protocol.MouseData{X: cursorX, Y: cursorY, Flags: int32(flags)})
+		sender.Send(protocol.Mouse, &protocol.MouseData{
+			X:          cursorX,
+			Y:          cursorY,
+			WheelDelta: xButton,
+			Flags:      int32(flags),
+		})
 	}
 
 	evdev.OnKeyEvent = func(code uint16, pressed bool) {
@@ -322,8 +316,7 @@ func setupInputCapture(cfg *config.Config, client *network.Client) *input.EvdevC
 
 		log.Printf("[KEYBOARD] Linux code %d -> VK 0x%02X (%s)", code, vk, action)
 
-		sendPacket(client, nextID(), cfg.MachineID, client.RemoteMachineID, protocol.Keyboard, sendMu,
-			&protocol.KeyboardData{Vk: vk, Flags: flags})
+		sender.Send(protocol.Keyboard, &protocol.KeyboardData{Vk: vk, Flags: flags})
 	}
 
 	return evdev
@@ -358,17 +351,7 @@ func formatClipboardText(text string) []byte {
 	return utf16Bytes
 }
 
-func setupClipboard(clip *clipboard.Clipboard, client *network.Client, cfg *config.Config) {
-	var sendMu sync.Mutex
-	packetID := uint32(100)
-
-	nextID := func() uint32 {
-		sendMu.Lock()
-		defer sendMu.Unlock()
-		packetID++
-		return packetID
-	}
-
+func setupClipboard(clip *clipboard.Clipboard, sender *sessionSender) {
 	clip.OnChange = func(content string) {
 		formatted := formatClipboardText(content)
 		log.Printf("[clipboard] Sending %d chars (formatted: %d bytes)", len(content), len(formatted))
@@ -382,63 +365,18 @@ func setupClipboard(clip *clipboard.Clipboard, client *network.Client, cfg *conf
 				end = len(formatted)
 			}
 			chunk := formatted[i:end]
-			sendPacket(client, nextID(), cfg.MachineID, client.RemoteMachineID, protocol.ClipboardText, sendMu, chunk)
+			sender.Send(protocol.ClipboardText, chunk)
 		}
 
 		// Always send ClipboardDataEnd to signal end of transfer
-		sendPacket(client, nextID(), cfg.MachineID, client.RemoteMachineID, protocol.ClipboardDataEnd, sendMu, nil)
+		sender.Send(protocol.ClipboardDataEnd, nil)
 		log.Printf("[clipboard] Sent ClipboardDataEnd marker")
 	}
 }
 
-func sendPacket(client *network.Client, id, src, dst uint32, pktType protocol.PackageType, mu sync.Mutex, payload interface{}) {
-	if !client.IsConnected() {
-		return
-	}
-
-	pkt := &protocol.GenericData{
-		Header: protocol.Header{
-			Type:     pktType,
-			Id:       id,
-			Src:      src,
-			Des:      dst,
-			DateTime: uint64(time.Now().UnixNano() / 10000),
-		},
-	}
-
-	switch v := payload.(type) {
-	case *protocol.MouseData:
-		pkt.Mouse = v
-	case *protocol.KeyboardData:
-		pkt.Keyboard = v
-	case []byte:
-		pkt.Raw = v
-	}
-
-	mu.Lock()
-	err := client.Send(pkt)
-	mu.Unlock()
-	if err != nil {
-		// Only log errors if we're still connected (not during intentional shutdown)
-		if client.IsConnected() {
-			log.Printf("[send] Failed to send %v: %v", pktType, err)
-		}
-	}
-}
-
-func sendHeartbeats(ctx context.Context, client *network.Client, cfg *config.Config) {
-	var sendMu sync.Mutex
-	packetID := uint32(100)
-
-	nextID := func() uint32 {
-		sendMu.Lock()
-		defer sendMu.Unlock()
-		packetID++
-		return packetID
-	}
-
+func sendHeartbeats(ctx context.Context, sender *sessionSender) {
 	for i := 0; i < 15; i++ {
-		sendPacket(client, nextID(), cfg.MachineID, client.RemoteMachineID, protocol.Heartbeat, sendMu, nil)
+		sender.Send(protocol.Heartbeat, nil)
 		time.Sleep(100 * time.Millisecond)
 	}
 
@@ -449,7 +387,7 @@ func sendHeartbeats(ctx context.Context, client *network.Client, cfg *config.Con
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			sendPacket(client, nextID(), cfg.MachineID, client.RemoteMachineID, protocol.Heartbeat, sendMu, nil)
+			sender.Send(protocol.Heartbeat, nil)
 		}
 	}
 }
@@ -457,10 +395,10 @@ func sendHeartbeats(ctx context.Context, client *network.Client, cfg *config.Con
 func receiveLoop(ctx context.Context, client *network.Client, vi *input.VirtualInput, clip *clipboard.Clipboard, evdev *input.EvdevCapture, debug bool, disconnectCh chan<- struct{}) {
 	var clipboardBuffer []byte
 	var receivingClipboard bool
-	
+
 	// Track pressed keys for debugging
 	pressedKeys := make(map[uint16]bool)
-	
+
 	// Track mouse button states to detect stuck buttons
 	var leftDown, rightDown, middleDown, sideDown, extraDown bool
 
@@ -487,12 +425,12 @@ func receiveLoop(ctx context.Context, client *network.Client, vi *input.VirtualI
 		case protocol.Mouse:
 			if pkt.Mouse != nil {
 				flags := pkt.Mouse.Flags
-				
+
 				// Track button states from previous packet
 				// Use a static variable to track state between calls
 				// Since Go doesn't have static variables, we use a closure variable
 				// Actually, we need to track this at a higher scope
-				
+
 				// Windows MWB sends WM_ constants as flags
 				// Check exact message type, not just bits
 				isLDown := flags == input.WM_LBUTTONDOWN
@@ -573,7 +511,7 @@ func receiveLoop(ctx context.Context, client *network.Client, vi *input.VirtualI
 
 				log.Printf("[REMOTE-IN] Mouse %s | Pos(%d,%d) | RawFlags(0x%08X) | Btn[L=%v,R=%v,M=%v,X1=%v,X2=%v] | HeldKeys: %v",
 					action, pkt.Mouse.X, pkt.Mouse.Y, flags, leftDown, rightDown, middleDown, sideDown, extraDown, formatHeldKeys(pressedKeys))
-				
+
 				vi.InjectMouse(pkt.Mouse.X, pkt.Mouse.Y, pkt.Mouse.WheelDelta, pkt.Mouse.Flags)
 			}
 
@@ -583,7 +521,7 @@ func receiveLoop(ctx context.Context, client *network.Client, vi *input.VirtualI
 				flags := pkt.Keyboard.Flags
 				isPressed := flags&input.LLKHF_UP == 0
 				isExtended := flags&input.LLKHF_EXTENDED != 0
-				
+
 				action := "KEY_UP"
 				if isPressed {
 					action = "KEY_DOWN"
@@ -591,11 +529,11 @@ func receiveLoop(ctx context.Context, client *network.Client, vi *input.VirtualI
 				} else {
 					delete(pressedKeys, vk)
 				}
-				
+
 				keyName := vkToName(vk)
 				log.Printf("[REMOTE-IN] Keyboard %s | VK(0x%02X=%s) | Extended=%v | Flags(0x%08X) | HeldKeys: %v",
 					action, vk, keyName, isExtended, flags, formatHeldKeys(pressedKeys))
-				
+
 				vi.InjectKeyboard(pkt.Keyboard.Vk, pkt.Keyboard.Flags)
 			}
 
@@ -626,7 +564,7 @@ func receiveLoop(ctx context.Context, client *network.Client, vi *input.VirtualI
 			// Windows MWB sends this when returning to local machine
 			log.Printf("[recv] MachineSwitched from %d - returning to local mode", pkt.Header.Src)
 			evdev.Ungrab()
-			
+
 			// Sync OS cursor to center screen
 			vi.InjectMouse(32768, 32768, 0, input.WinMouseEventFMove|input.WinMouseEventFAbsolute)
 
@@ -688,25 +626,35 @@ func decompressAndParseClipboard(data []byte) string {
 	return payload
 }
 
-func buttonFlags(code uint16, pressed bool) int32 {
+func buttonPacket(code uint16, pressed bool) (flags int32, wheelDelta int32) {
 	switch code {
 	case input.BTN_LEFT:
 		if pressed {
-			return input.WM_LBUTTONDOWN
+			return input.WM_LBUTTONDOWN, 0
 		}
-		return input.WM_LBUTTONUP
+		return input.WM_LBUTTONUP, 0
 	case input.BTN_RIGHT:
 		if pressed {
-			return input.WM_RBUTTONDOWN
+			return input.WM_RBUTTONDOWN, 0
 		}
-		return input.WM_RBUTTONUP
+		return input.WM_RBUTTONUP, 0
 	case input.BTN_MIDDLE:
 		if pressed {
-			return input.WM_MBUTTONDOWN
+			return input.WM_MBUTTONDOWN, 0
 		}
-		return input.WM_MBUTTONUP
+		return input.WM_MBUTTONUP, 0
+	case input.BTN_SIDE:
+		if pressed {
+			return input.WM_XBUTTONDOWN, 1
+		}
+		return input.WM_XBUTTONUP, 1
+	case input.BTN_EXTRA:
+		if pressed {
+			return input.WM_XBUTTONDOWN, 2
+		}
+		return input.WM_XBUTTONUP, 2
 	}
-	return 0
+	return 0, 0
 }
 
 func clamp(v, min, max int32) int32 {
