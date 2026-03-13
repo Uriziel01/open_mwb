@@ -193,7 +193,7 @@ func (c *Clipboard) SetText(text string) error {
 }
 
 func (c *Clipboard) Watch() {
-	ticker := time.NewTicker(500 * time.Millisecond)
+	ticker := time.NewTicker(2000 * time.Millisecond)
 	defer ticker.Stop()
 	for {
 		select {

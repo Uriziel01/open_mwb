@@ -282,7 +282,7 @@ type EvdevCapture struct {
 	OnMouseEvent   func(dx, dy, wheelDelta int)
 	OnKeyEvent     func(code uint16, pressed bool)
 	OnButtonEvent  func(code uint16, pressed bool)
-	OnEmergency    func() // Called when F3 is pressed (emergency kill switch)
+	OnEmergency    func() // Called when PAUSE is pressed (emergency kill switch)
 	pressedKeys    map[uint16]bool
 }
 
@@ -609,10 +609,10 @@ func (e *EvdevCapture) runSingleKeyboardLoop(dev *DeviceHandle) {
 		activeKbd := e.activeKbdDev
 		e.mu.Unlock()
 
-		// Handle emergency button (F3) on ALL keyboards in both local and remote mode
+		// Handle emergency button (PAUSE) on ALL keyboards in both local and remote mode
 		// This ensures the emergency button works even when devices are grabbed
-		if ev.Code == 61 && ev.Value == 1 { // F3 pressed
-			log.Println("[evdev] F3 (emergency) detected on keyboard")
+		if ev.Code == 119 && ev.Value == 1 { // PAUSE pressed
+			log.Println("[evdev] PAUSE (emergency) detected on keyboard")
 			if e.OnEmergency != nil {
 				e.OnEmergency()
 			}

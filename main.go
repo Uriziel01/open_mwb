@@ -134,7 +134,7 @@ func runSession(ctx context.Context, cfg *config.Config, client *network.Client)
 	log.Println("Ready! Use keyboard shortcuts to switch machines.")
 	log.Println("Win+F1 - Switch to Machine 1 (Windows)")
 	log.Println("Win+F2 - Switch to Machine 2 (Linux)")
-	log.Println("F3 - Emergency kill (releases all devices).")
+	log.Println("PAUSE - Emergency kill (releases all devices).")
 	log.Println("Ctrl+C - Quit.")
 
 	// Wait for disconnection or context cancellation, then cleanup
@@ -268,7 +268,7 @@ func setupInputCapture(cfg *config.Config, client *network.Client) *input.EvdevC
 	}
 
 	evdev.OnEmergency = func() {
-		log.Println("[EMERGENCY] F3 key detected - releasing all devices and exiting!")
+				log.Println("[EMERGENCY] PAUSE key detected - releasing all devices and exiting!")
 		evdev.Close()
 		os.Exit(1)
 	}
@@ -501,12 +501,12 @@ func receiveLoop(ctx context.Context, client *network.Client, vi *input.VirtualI
 				isRUp := flags == input.WM_RBUTTONUP
 				isMDown := flags == input.WM_MBUTTONDOWN
 				isMUp := flags == input.WM_MBUTTONUP
-				// For X buttons, check the base message type (low 16 bits) 
-				// The X button number (1 or 2) is in the HIGH word (bits 16-31)
-				isXDown := flags&0xFFFF == input.WM_XBUTTONDOWN
-				isXUp := flags&0xFFFF == input.WM_XBUTTONUP
-				// Extract X button number from high word: 1 = XBUTTON1, 2 = XBUTTON2
-				xButtonNum := uint16((flags >> 16) & 0xFFFF)
+				// For X buttons, check the base message type (low 16 bits)
+				// The X button number (1 or 2) is stored in WheelDelta field, not flags!
+				isXDown := flags == input.WM_XBUTTONDOWN
+				isXUp := flags == input.WM_XBUTTONUP
+				// Extract X button number from WheelDelta: 1 = XBUTTON1, 2 = XBUTTON2
+				xButtonNum := uint16(pkt.Mouse.WheelDelta)
 				isXButton1 := isXDown && xButtonNum == 1
 				isXButton2 := isXDown && xButtonNum == 2
 				isXButton1Up := isXUp && xButtonNum == 1
@@ -754,9 +754,9 @@ func runDemo(cfg *config.Config) {
 	fmt.Println("Done! Did the cursor move?")
 }
 
-// emergencyKillSwitch monitors for F3 key and kills the app immediately
+// emergencyKillSwitch monitors for PAUSE key and kills the app immediately
 // This is a safety mechanism to prevent getting locked out
-// F3 is KEY_F3 = 61 in Linux input event codes
+// PAUSE is KEY_PAUSE = 119 in Linux input event codes
 func emergencyKillSwitch(ctx context.Context, evdev *input.EvdevCapture) {
 	// Open keyboard device directly for monitoring
 	kbdPath := "/dev/input/event7"
@@ -787,14 +787,14 @@ func emergencyKillSwitch(ctx context.Context, evdev *input.EvdevCapture) {
 			return
 		}
 
-		// Check for F3 key (code 61) press
+		// Check for PAUSE key (code 119) press
 		// Input event: [time 16 bytes][type 2 bytes][code 2 bytes][value 4 bytes]
 		code := uint16(buf[18]) | uint16(buf[19])<<8
 		value := int32(buf[20]) | int32(buf[21])<<8 | int32(buf[22])<<16 | int32(buf[23])<<24
 		evType := uint16(buf[16]) | uint16(buf[17])<<8
 		log.Printf("[emergency] Event type %d, code %d, value %d", evType, code, value)
-		if evType == 1 && code == 61 && value == 1 { // EV_KEY, F3, press
-			log.Println("[EMERGENCY] F3 key detected - releasing all devices and exiting!")
+		if evType == 1 && code == 119 && value == 1 { // EV_KEY, PAUSE, press
+			log.Println("[EMERGENCY] PAUSE key detected - releasing all devices and exiting!")
 			evdev.Close()
 			os.Exit(1)
 		}

@@ -278,7 +278,7 @@ func (vi *VirtualInput) InjectMouse(x, y, wheelDelta, flags int32) {
 	vi.absX = absX
 	vi.absY = absY
 
-	changed := vi.updateButtons(flags)
+	changed := vi.updateButtons(flags, wheelDelta)
 
 	if wheelDelta != 0 {
 		linuxWheel := wheelDelta / 120
@@ -296,7 +296,7 @@ func (vi *VirtualInput) InjectMouse(x, y, wheelDelta, flags int32) {
 	}
 }
 
-func (vi *VirtualInput) updateButtons(flags int32) bool {
+func (vi *VirtualInput) updateButtons(flags, wheelDelta int32) bool {
 	// Windows MWB sends WM_* message types, not bit flags
 	// Check exact message types to determine button state
 	isLDown := flags == WM_LBUTTONDOWN
@@ -305,12 +305,12 @@ func (vi *VirtualInput) updateButtons(flags int32) bool {
 	isRUp := flags == WM_RBUTTONUP
 	isMDown := flags == WM_MBUTTONDOWN
 	isMUp := flags == WM_MBUTTONUP
-	// For X buttons, check the base message type (low 16 bits)
-	// The X button number (1 or 2) is in the HIGH word (bits 16-31)
-	isXDown := flags&0xFFFF == WM_XBUTTONDOWN
-	isXUp := flags&0xFFFF == WM_XBUTTONUP
-	// Extract X button number from high word: 1 = XBUTTON1, 2 = XBUTTON2
-	xButtonNum := uint16((flags >> 16) & 0xFFFF)
+	// For X buttons, the button number is passed in wheelDelta field
+	// Per Windows MWB protocol: WheelDelta = 1 for XBUTTON1, 2 for XBUTTON2
+	isXDown := flags == WM_XBUTTONDOWN
+	isXUp := flags == WM_XBUTTONUP
+	// Extract X button number from wheelDelta: 1 = XBUTTON1, 2 = XBUTTON2
+	xButtonNum := uint16(wheelDelta)
 	isXButton1 := isXDown && xButtonNum == 1
 	isXButton2 := isXDown && xButtonNum == 2
 	isXButton1Up := isXUp && xButtonNum == 1
