@@ -84,22 +84,22 @@ var VKToLinux = map[int32]uint16{
 	0x5C: 126, // VK_RWIN -> KEY_RIGHTMETA
 
 	// Numpad
-	0x60: 82,  // VK_NUMPAD0 -> KEY_KP0
-	0x61: 79,  // VK_NUMPAD1 -> KEY_KP1
-	0x62: 80,  // VK_NUMPAD2 -> KEY_KP2
-	0x63: 81,  // VK_NUMPAD3 -> KEY_KP3
-	0x64: 75,  // VK_NUMPAD4 -> KEY_KP4
-	0x65: 76,  // VK_NUMPAD5 -> KEY_KP5
-	0x66: 77,  // VK_NUMPAD6 -> KEY_KP6
-	0x67: 71,  // VK_NUMPAD7 -> KEY_KP7
-	0x68: 72,  // VK_NUMPAD8 -> KEY_KP8
-	0x69: 73,  // VK_NUMPAD9 -> KEY_KP9
-	0x6A: 55,  // VK_MULTIPLY -> KEY_KPASTERISK
-	0x6B: 78,  // VK_ADD -> KEY_KPPLUS
-	0x6D: 74,  // VK_SUBTRACT -> KEY_KPMINUS
-	0x6E: 83,  // VK_DECIMAL -> KEY_KPDOT
-	0x6F: 98,  // VK_DIVIDE -> KEY_KPSLASH
-	0x90: 69,  // VK_NUMLOCK -> KEY_NUMLOCK
+	0x60: 82, // VK_NUMPAD0 -> KEY_KP0
+	0x61: 79, // VK_NUMPAD1 -> KEY_KP1
+	0x62: 80, // VK_NUMPAD2 -> KEY_KP2
+	0x63: 81, // VK_NUMPAD3 -> KEY_KP3
+	0x64: 75, // VK_NUMPAD4 -> KEY_KP4
+	0x65: 76, // VK_NUMPAD5 -> KEY_KP5
+	0x66: 77, // VK_NUMPAD6 -> KEY_KP6
+	0x67: 71, // VK_NUMPAD7 -> KEY_KP7
+	0x68: 72, // VK_NUMPAD8 -> KEY_KP8
+	0x69: 73, // VK_NUMPAD9 -> KEY_KP9
+	0x6A: 55, // VK_MULTIPLY -> KEY_KPASTERISK
+	0x6B: 78, // VK_ADD -> KEY_KPPLUS
+	0x6D: 74, // VK_SUBTRACT -> KEY_KPMINUS
+	0x6E: 83, // VK_DECIMAL -> KEY_KPDOT
+	0x6F: 98, // VK_DIVIDE -> KEY_KPSLASH
+	0x90: 69, // VK_NUMLOCK -> KEY_NUMLOCK
 
 	// Function keys F1-F12
 	0x70: 59, // VK_F1 -> KEY_F1
@@ -148,6 +148,10 @@ func init() {
 	for vk, linux := range VKToLinux {
 		LinuxToVK[linux] = vk
 	}
+
+	// Some Linux keyboards emit PrintScreen as KEY_SYSRQ (99)
+	// while others emit KEY_PRINT (210). Both should map to VK_SNAPSHOT.
+	LinuxToVK[99] = 0x2C
 }
 
 // Windows LLKHF (Low-Level Keyboard Hook Flags) - used in MWB network protocol
@@ -179,25 +183,25 @@ const (
 
 // Windows mouse message flags (wParam) - sent in MouseData.Flags field
 const (
-	WinMouseMKLButton = 0x0001 // Left button is down
-	WinMouseMKRButton = 0x0002 // Right button is down
-	WinMouseMKMButton = 0x0010 // Middle button is down
+	WinMouseMKLButton  = 0x0001 // Left button is down
+	WinMouseMKRButton  = 0x0002 // Right button is down
+	WinMouseMKMButton  = 0x0010 // Middle button is down
 	WinMouseMKXButton1 = 0x0020 // X1 button is down
 	WinMouseMKXButton2 = 0x0040 // X2 button is down
 )
 
 // Windows Messages (WM_*) for remote mouse injection
 const (
-	WM_MOUSEMOVE     = 0x0200
-	WM_LBUTTONDOWN   = 0x0201
-	WM_LBUTTONUP     = 0x0202
-	WM_RBUTTONDOWN   = 0x0204
-	WM_RBUTTONUP     = 0x0205
-	WM_MBUTTONDOWN   = 0x0207
-	WM_MBUTTONUP     = 0x0208
-	WM_XBUTTONDOWN   = 0x020B
-	WM_XBUTTONUP     = 0x020C
-	WM_MOUSEWHEEL    = 0x020A
-	WM_KEYDOWN       = 0x0100
-	WM_KEYUP         = 0x0101
+	WM_MOUSEMOVE   = 0x0200
+	WM_LBUTTONDOWN = 0x0201
+	WM_LBUTTONUP   = 0x0202
+	WM_RBUTTONDOWN = 0x0204
+	WM_RBUTTONUP   = 0x0205
+	WM_MBUTTONDOWN = 0x0207
+	WM_MBUTTONUP   = 0x0208
+	WM_XBUTTONDOWN = 0x020B
+	WM_XBUTTONUP   = 0x020C
+	WM_MOUSEWHEEL  = 0x020A
+	WM_KEYDOWN     = 0x0100
+	WM_KEYUP       = 0x0101
 )
