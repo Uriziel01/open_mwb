@@ -671,6 +671,12 @@ func (e *EvdevCapture) Ungrab() error {
 	return nil
 }
 
+func (e *EvdevCapture) IsRemoteMode() bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.IsRemote
+}
+
 func (e *EvdevCapture) RunMouseLoop() {
 	// Start a goroutine for each mouse device
 	var wg sync.WaitGroup

@@ -7,9 +7,12 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math"
+	mrand "math/rand"
 	"os"
 	"os/signal"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -119,7 +122,7 @@ func runSession(ctx context.Context, cfg *config.Config, client *network.Client)
 		log.Fatalf("Failed to create virtual input: %v", err)
 	}
 
-	evdev := setupInputCapture(cfg, sender)
+	evdev, jigglerTick := setupInputCapture(cfg, sender)
 
 	clip := clipboard.New()
 	setupClipboard(clip, sender)
@@ -128,6 +131,10 @@ func runSession(ctx context.Context, cfg *config.Config, client *network.Client)
 	go evdev.RunKeyboardLoop()
 	go clip.Watch()
 	go sendHeartbeats(ctx, sender)
+	if cfg.MouseJiggler {
+		log.Println("[jiggler] Enabled: will send a random modifier key tap every random 30-60s while in local mode")
+		go runMouseJiggler(ctx, evdev, jigglerTick)
+	}
 	go receiveLoop(ctx, client, vi, clip, evdev, cfg.Debug, disconnectCh)
 
 	log.Println("")
@@ -213,7 +220,7 @@ func runBackgroundServer(server *network.Server) {
 	}
 }
 
-func setupInputCapture(cfg *config.Config, sender *sessionSender) *input.EvdevCapture {
+func setupInputCapture(cfg *config.Config, sender *sessionSender) (*input.EvdevCapture, func() (bool, string)) {
 	evdev := input.NewEvdevCapture(cfg.ScreenWidth, cfg.ScreenHeight)
 
 	// Use auto-discovery by default (recommended - works with all hardware)
@@ -250,9 +257,31 @@ func setupInputCapture(cfg *config.Config, sender *sessionSender) *input.EvdevCa
 		}
 	}
 
-	log.Printf("Screen: %dx%d | Mouse sensitivity: %d", cfg.ScreenWidth, cfg.ScreenHeight, cfg.MouseSensitivity)
+	// Sensitivity is normalized so the historic default (24) maps to 1.0x pixel gain.
+	baseScale := float64(cfg.MouseSensitivity) / 24.0
+	sourceWidth := float64(max(cfg.ScreenWidth, 1))
+	sourceHeight := float64(max(cfg.ScreenHeight, 1))
+	log.Printf("Screen: %dx%d | Mouse sensitivity: %d (effective pixel gain: %.3fx) | Source normalization: %dx%d",
+		cfg.ScreenWidth, cfg.ScreenHeight, cfg.MouseSensitivity, baseScale, cfg.ScreenWidth, cfg.ScreenHeight)
 
-	cursorX, cursorY := int32(32768), int32(32768)
+	cursorXf, cursorYf := sourceWidth/2.0, sourceHeight/2.0
+	var cursorMu sync.Mutex
+	currentCursor := func() (int32, int32) {
+		return pixelToAbsolute(cursorXf, sourceWidth), pixelToAbsolute(cursorYf, sourceHeight)
+	}
+	jigglerRNG := mrand.New(mrand.NewSource(time.Now().UnixNano()))
+	jigglerKeys := []struct {
+		vk        int32
+		downFlags int32
+		name      string
+	}{
+		{vk: 0xA2, downFlags: 0, name: "LCTRL"},
+		{vk: 0xA4, downFlags: 0, name: "LALT"},
+		{vk: 0xA0, downFlags: 0, name: "LSHIFT"},
+		{vk: 0xA3, downFlags: input.LLKHF_EXTENDED, name: "RCTRL"},
+		{vk: 0xA5, downFlags: input.LLKHF_EXTENDED, name: "RALT"},
+		{vk: 0xA1, downFlags: 0, name: "RSHIFT"},
+	}
 
 	evdev.OnEdgeHit = func() {
 		log.Println("[main] Edge hit - forwarding to remote")
@@ -269,12 +298,16 @@ func setupInputCapture(cfg *config.Config, sender *sessionSender) *input.EvdevCa
 	}
 
 	evdev.OnMouseEvent = func(dx, dy, wheel int) {
+		cursorMu.Lock()
+		defer cursorMu.Unlock()
+
 		if wheel == 0 {
-			cursorX += int32(dx * cfg.MouseSensitivity)
-			cursorY += int32(dy * cfg.MouseSensitivity)
-			cursorX = clamp(cursorX, 0, 65535)
-			cursorY = clamp(cursorY, 0, 65535)
+			cursorXf += float64(dx) * baseScale
+			cursorYf += float64(dy) * baseScale
+			cursorXf = clampFloat(cursorXf, 0, sourceWidth)
+			cursorYf = clampFloat(cursorYf, 0, sourceHeight)
 		}
+		cursorX, cursorY := currentCursor()
 
 		flags := input.WM_MOUSEMOVE
 		if wheel != 0 {
@@ -289,6 +322,11 @@ func setupInputCapture(cfg *config.Config, sender *sessionSender) *input.EvdevCa
 		if flags == 0 {
 			return
 		}
+
+		cursorMu.Lock()
+		defer cursorMu.Unlock()
+
+		cursorX, cursorY := currentCursor()
 		sender.Send(protocol.Mouse, &protocol.MouseData{
 			X:          cursorX,
 			Y:          cursorY,
@@ -323,7 +361,19 @@ func setupInputCapture(cfg *config.Config, sender *sessionSender) *input.EvdevCa
 		sender.Send(protocol.Keyboard, &protocol.KeyboardData{Vk: vk, Flags: flags})
 	}
 
-	return evdev
+	jigglerTick := func() (bool, string) {
+		if evdev.IsRemoteMode() {
+			return false, ""
+		}
+
+		key := jigglerKeys[jigglerRNG.Intn(len(jigglerKeys))]
+		sender.Send(protocol.Keyboard, &protocol.KeyboardData{Vk: key.vk, Flags: key.downFlags})
+		sender.Send(protocol.Keyboard, &protocol.KeyboardData{Vk: key.vk, Flags: key.downFlags | input.LLKHF_UP})
+
+		return true, key.name
+	}
+
+	return evdev, jigglerTick
 }
 
 // formatClipboardText formats text for Windows MWB compatibility
@@ -392,6 +442,28 @@ func sendHeartbeats(ctx context.Context, sender *sessionSender) {
 			return
 		case <-ticker.C:
 			sender.Send(protocol.Heartbeat, nil)
+		}
+	}
+}
+
+func runMouseJiggler(ctx context.Context, evdev *input.EvdevCapture, jigglerTick func() (bool, string)) {
+	rng := mrand.New(mrand.NewSource(time.Now().UnixNano()))
+
+	for {
+		wait := time.Duration(30+rng.Intn(31)) * time.Second
+		timer := time.NewTimer(wait)
+
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return
+		case <-timer.C:
+		}
+
+		if jigglerTick != nil {
+			if ok, keyName := jigglerTick(); ok {
+				log.Printf("[jiggler] Sent keep-awake key tap (%s) after %s idle window", keyName, wait)
+			}
 		}
 	}
 }
@@ -669,6 +741,24 @@ func clamp(v, min, max int32) int32 {
 		return max
 	}
 	return v
+}
+
+func clampFloat(v, min, max float64) float64 {
+	if v < min {
+		return min
+	}
+	if v > max {
+		return max
+	}
+	return v
+}
+
+func pixelToAbsolute(pos, size float64) int32 {
+	if size <= 0 {
+		return 0
+	}
+	n := int32(math.Round((clampFloat(pos, 0, size) / size) * 65535.0))
+	return clamp(n, 0, 65535)
 }
 
 func runDemo(cfg *config.Config) {

@@ -72,6 +72,7 @@ Create a `config.json` next to the binary (or in the working directory):
   "id":     2,
   "name":   "[THIS_MACHINE_NAME]",
   "mouse_sensitivity": 24,
+  "mouse_jiggler": false,
   "edge":   "right",
   "mode":   "client"
 }
@@ -85,6 +86,7 @@ Create a `config.json` next to the binary (or in the working directory):
 | `id`     | A unique integer ID for **this** machine (pick any non-zero value)  |
 | `name`   | This machine's hostname (auto-detected from `hostname` if omitted)  |
 | `mouse_sensitivity` | Linux→Windows mouse scale factor (default `24`, lower is slower) |
+| `mouse_jiggler` | Keep-awake random modifier key tap every random 30-60s while in local mode (default `false`) |
 | `edge`   | Which screen edge is adjacent to Windows: `left`, `right`, `top`, `bottom` |
 | `mode`   | `client` (full input forwarding) or `tui` (debug terminal UI)       |
 

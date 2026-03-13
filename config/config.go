@@ -39,6 +39,9 @@ type Config struct {
 	// Debug
 	Debug bool `json:"debug"`
 
+	// Optional keep-awake helper for remote machine
+	MouseJiggler bool `json:"mouse_jiggler"`
+
 	// CLI-only, not in JSON
 	ListDevices bool   `json:"-"`
 	ConfigFile  string `json:"-"`
@@ -108,6 +111,7 @@ func (c *Config) saveToJSON() error {
 		Key              string `json:"key"`
 		Remote           string `json:"remote"`
 		MouseSensitivity int    `json:"mouse_sensitivity"`
+		MouseJiggler     bool   `json:"mouse_jiggler"`
 		Mode             string `json:"mode"`
 		ID               uint32 `json:"id"`
 		Name             string `json:"name"`
@@ -116,6 +120,7 @@ func (c *Config) saveToJSON() error {
 		Key:              c.SecurityKey,
 		Remote:           c.RemoteAddress,
 		MouseSensitivity: c.MouseSensitivity,
+		MouseJiggler:     c.MouseJiggler,
 		Mode:             c.Mode,
 		ID:               c.MachineID,
 		Name:             c.MachineName,
@@ -275,6 +280,7 @@ func Parse() *Config {
 		flagConfig    = flag.String("config", "", "Path to config.json (auto-detected if empty)")
 		flagDebug     = flag.Bool("debug", false, "Enable debug packet logging")
 		flagMouseSens = flag.Int("mouse-sensitivity", 0, "Remote mouse movement scale (higher = faster)")
+		flagJiggler   = flag.Bool("mouse-jiggler", false, "Enable keep-awake jiggler (random modifier key tap every 30-60s in local mode)")
 	)
 	flag.BoolVar(&c.ListDevices, "list-devices", false, "List all /dev/input devices and exit")
 	flag.BoolVar(&c.ShowVersion, "version", false, "Print version and exit")
@@ -317,6 +323,8 @@ func Parse() *Config {
 			c.Debug = *flagDebug
 		case "mouse-sensitivity":
 			c.MouseSensitivity = *flagMouseSens
+		case "mouse-jiggler":
+			c.MouseJiggler = *flagJiggler
 		}
 	})
 
@@ -370,6 +378,7 @@ config.json example:
     "key": "YourSecurityKey",
     "remote": "192.168.1.100",
     "mouse_sensitivity": 24,
+    "mouse_jiggler": false,
     "mode": "client",
     "id": 1001
   }
